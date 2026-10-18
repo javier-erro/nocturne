@@ -1025,7 +1025,7 @@ public class StatisticsController : ControllerBase
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns><see cref="PunchCardResponse"/> with months, days, and global maxes for chart scaling.</returns>
     /// <remarks>
-    /// A caller without <c>treatments.read</c> is not read any insulin or carbs, so every carb,
+    /// For a caller without <c>treatments.read</c> no insulin or carbs are read, so every carb,
     /// insulin and ratio figure is zero (<see cref="StatisticsReadScopeGuard"/>).
     /// </remarks>
     [HttpGet("punch-card")]
