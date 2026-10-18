@@ -37,8 +37,7 @@ public interface ICategoryReadContext
     /// without full history, or a member or credential clamped by
     /// <see cref="ClampMemberHistory"/>. A non-share whose clamp is never resolved is not
     /// clamped, so members, owners and background work read full history unless something
-    /// narrows them. The single predicate every tenant-keyed cache of such data checks, since
-    /// RLS narrows only database reads.
+    /// narrows them. Caches see it only through <see cref="IReaderCachePartition"/>.
     /// </summary>
     bool IsHistoryClamped { get; }
 

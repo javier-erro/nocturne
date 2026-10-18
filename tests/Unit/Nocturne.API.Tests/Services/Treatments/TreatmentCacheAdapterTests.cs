@@ -1,72 +1,51 @@
 using Microsoft.Extensions.Logging.Abstractions;
-using Nocturne.API.Services.Platform;
+using Nocturne.API.Services.Caching;
 using Nocturne.API.Services.Treatments;
-using Nocturne.Core.Contracts.Multitenancy;
+using Nocturne.API.Tests.Infrastructure;
 using Nocturne.Core.Contracts.Treatments;
-using Nocturne.Infrastructure.Cache.Abstractions;
-using Nocturne.Infrastructure.Data.Services;
 
 namespace Nocturne.API.Tests.Services.Treatments;
 
-/// <summary>
-/// The recent-treatment cache is keyed by tenant alone, so a history-clamped reader has to stay
-/// out of it entirely, for the reason given on <see cref="Entries.EntryCacheAdapterTests"/>.
-/// </summary>
 [Trait("Category", "Unit")]
 public class TreatmentCacheAdapterTests
 {
     private static readonly TreatmentQuery CacheableQuery = new() { Count = 10, Skip = 0 };
 
-    private readonly Mock<ICacheService> _cache = new();
-    private readonly CategoryReadContext _categoryReadContext = new();
-    private readonly List<Treatment> _cachedTreatments = [new() { Id = "cached" }];
+    private static TreatmentCacheAdapter Adapter(ITenantCache cache) =>
+        new(cache, NullLogger<TreatmentCacheAdapter>.Instance);
 
-    public TreatmentCacheAdapterTests()
+    [Fact]
+    public async Task GetOrComputeAsync_CacheableQuery_ServesTheTenantCache()
     {
-        _cache
+        var cached = new List<Treatment> { new() { Id = "cached" } };
+        var cache = new Mock<ITenantCache>();
+        cache
             .Setup(c => c.GetOrSetAsync(
                 It.IsAny<string>(), It.IsAny<Func<Task<List<Treatment>>>>(),
-                It.IsAny<TimeSpan?>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(_cachedTreatments);
-    }
+                It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(cached);
 
-    private TreatmentCacheAdapter Adapter()
-    {
-        var tenant = new Mock<ITenantAccessor>();
-        tenant.SetupGet(t => t.Context)
-            .Returns(new TenantContext(Guid.CreateVersion7(), "test", "Test", true, false));
+        var result = await Adapter(cache.Object).GetOrComputeAsync(
+            CacheableQuery, () => Task.FromResult<IReadOnlyList<Treatment>>([]), CancellationToken.None);
 
-        return new TreatmentCacheAdapter(
-            _cache.Object,
-            Mock.Of<IDemoModeService>(),
-            tenant.Object,
-            _categoryReadContext,
-            NullLogger<TreatmentCacheAdapter>.Instance);
+        result.Should().BeSameAs(cached);
     }
 
     [Fact]
-    public async Task GetOrComputeAsync_Unclamped_ServesTheTenantCache()
+    public async Task InvalidateAsync_DropsTheCachedRead()
     {
-        var result = await Adapter().GetOrComputeAsync(
-            CacheableQuery, () => Task.FromResult<IReadOnlyList<Treatment>>([]), CancellationToken.None);
+        var adapter = Adapter(TestTenantCache.Create());
+        await adapter.GetOrComputeAsync(
+            CacheableQuery,
+            () => Task.FromResult<IReadOnlyList<Treatment>>([new Treatment { Id = "stale" }]),
+            CancellationToken.None);
 
-        result.Should().BeSameAs(_cachedTreatments);
-    }
+        await adapter.InvalidateAsync(CancellationToken.None);
+        var result = await adapter.GetOrComputeAsync(
+            CacheableQuery,
+            () => Task.FromResult<IReadOnlyList<Treatment>>([new Treatment { Id = "fresh" }]),
+            CancellationToken.None);
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task GetOrComputeAsync_HistoryClamped_NeitherReadsNorWritesTheCache(bool share)
-    {
-        if (share)
-            _categoryReadContext.MarkShare();
-        else
-            _categoryReadContext.ClampMemberHistory();
-
-        var result = await Adapter().GetOrComputeAsync(
-            CacheableQuery, () => Task.FromResult<IReadOnlyList<Treatment>>([]), CancellationToken.None);
-
-        result.Should().BeNull("a null answer sends the caller straight to the store");
-        _cache.Invocations.Should().BeEmpty();
+        result!.Single().Id.Should().Be("fresh");
     }
 }

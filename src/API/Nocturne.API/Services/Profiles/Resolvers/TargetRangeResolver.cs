@@ -1,9 +1,8 @@
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Nocturne.Core.Constants;
-using Nocturne.Core.Contracts.Multitenancy;
 using Nocturne.Core.Contracts.Profiles.Resolvers;
 using Nocturne.Core.Contracts.V4.Repositories;
+using Nocturne.API.Services.Caching;
 
 namespace Nocturne.API.Services.Profiles.Resolvers;
 
@@ -17,8 +16,7 @@ internal sealed class TargetRangeResolver : ITargetRangeResolver
     private readonly ITherapySettingsRepository _therapyRepo;
     private readonly IPatientRecordRepository _patientRecordRepo;
     private readonly IActiveProfileResolver _activeProfileResolver;
-    private readonly ITenantAccessor _tenantAccessor;
-    private readonly IMemoryCache _cache;
+    private readonly ITenantCache _cache;
     private readonly ILogger<TargetRangeResolver> _logger;
 
     private const int CacheTtlSeconds = 5;
@@ -30,15 +28,13 @@ internal sealed class TargetRangeResolver : ITargetRangeResolver
         ITherapySettingsRepository therapyRepo,
         IPatientRecordRepository patientRecordRepo,
         IActiveProfileResolver activeProfileResolver,
-        ITenantAccessor tenantAccessor,
-        IMemoryCache cache,
+        ITenantCache cache,
         ILogger<TargetRangeResolver> logger)
     {
         _repo = repo;
         _therapyRepo = therapyRepo;
         _patientRecordRepo = patientRecordRepo;
         _activeProfileResolver = activeProfileResolver;
-        _tenantAccessor = tenantAccessor;
         _cache = cache;
         _logger = logger;
     }
@@ -81,13 +77,9 @@ internal sealed class TargetRangeResolver : ITargetRangeResolver
     private async Task<Core.Models.V4.TargetRangeSchedule?> GetCachedScheduleAsync(
         string profileName, DateTime timestamp, CancellationToken ct)
     {
-        var cacheKey = $"TargetRangeSchedule:{_tenantAccessor.TenantId}:{profileName}";
-
-        if (_cache.TryGetValue(cacheKey, out Core.Models.V4.TargetRangeSchedule? cached))
-            return cached;
-
-        var schedule = await _repo.GetActiveAtAsync(profileName, timestamp, ct);
-        _cache.Set(cacheKey, schedule, TimeSpan.FromSeconds(CacheTtlSeconds));
-        return schedule;
+        return await _cache.GetOrCreateLocalAsync(
+            ScheduleCacheKey.For("target-range-schedule", profileName, timestamp),
+            () => _repo.GetActiveAtAsync(profileName, timestamp, ct),
+            TimeSpan.FromSeconds(CacheTtlSeconds));
     }
 }

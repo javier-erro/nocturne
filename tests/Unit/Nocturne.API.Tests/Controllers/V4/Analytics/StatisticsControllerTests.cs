@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using Moq;
 using Nocturne.API.Controllers.V4.Analytics;
 using Nocturne.API.Services.Analytics;
+using Nocturne.API.Services.Caching;
 using Nocturne.Core.Contracts.Analytics;
 using Nocturne.Core.Contracts.Glucose;
 using Nocturne.Core.Contracts.Multitenancy;
@@ -43,13 +44,9 @@ public class StatisticsControllerTests
     private StatisticsController CreateController(
         ICanonicalGlucoseService? canonicalGlucose = null,
         IStatisticsService? statisticsService = null,
-        ICacheService? cacheService = null,
+        ITenantCache? cache = null,
         ICategoryReadContext? categoryReadContext = null)
     {
-        var tenantAccessor = new Mock<ITenantAccessor>();
-        tenantAccessor.SetupGet(a => a.Context)
-            .Returns(new TenantContext(Guid.CreateVersion7(), "test", "Test", true, false));
-
         _deviceEventRepoMock
             .Setup(r => r.GetAllCopiesAsync(
                 It.IsAny<DateTime>(), It.IsAny<DateTime>(), It.IsAny<IReadOnlyCollection<DeviceEventType>>(), It.IsAny<CancellationToken>()))
@@ -57,7 +54,7 @@ public class StatisticsControllerTests
 
         var controller = new StatisticsController(
             statisticsService ?? _statsServiceMock.Object,
-            cacheService ?? Mock.Of<ICacheService>(),
+            cache ?? Mock.Of<ITenantCache>(),
             Mock.Of<IProfileProjectionService>(),
             _basalRateResolverMock.Object,
             _basalSegmentsMock.Object,
@@ -66,7 +63,6 @@ public class StatisticsControllerTests
             _bolusRepoMock.Object,
             _carbIntakeRepoMock.Object,
             _tempBasalRepoMock.Object,
-            tenantAccessor.Object,
             _aidMetricsServiceMock.Object,
             _patientDeviceRepoMock.Object,
             _apsSnapshotRepoMock.Object,
@@ -1886,65 +1882,15 @@ public class StatisticsControllerTests
     }
 
     [Fact]
-    public async Task GetMultiPeriodStatistics_Unclamped_ServesTheTenantCache()
+    public async Task GetMultiPeriodStatistics_ServesTheTenantCache()
     {
         var cached = new MultiPeriodStatistics();
-        var cache = new Mock<ICacheService>();
+        var cache = new Mock<ITenantCache>();
         cache.Setup(c => c.GetAsync<MultiPeriodStatistics>(It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(cached);
 
-        var result = await CreateController(cacheService: cache.Object).GetMultiPeriodStatistics();
+        var result = await CreateController(cache: cache.Object).GetMultiPeriodStatistics();
 
         result.Result.Should().BeOfType<OkObjectResult>().Subject.Value.Should().BeSameAs(cached);
-    }
-
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task GetMultiPeriodStatistics_HistoryClamped_NeitherReadsNorWritesTheCache(bool share)
-    {
-        // The cache holds statistics an unclamped reader computed over 90 days; a clamped reader
-        // must not be served them, nor leave its own narrowed statistics for the next reader.
-        var cached = new MultiPeriodStatistics();
-        var cache = new Mock<ICacheService>();
-        cache.Setup(c => c.GetAsync<MultiPeriodStatistics>(It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(cached);
-        var category = new CategoryReadContext();
-        if (share)
-            category.MarkShare();
-        else
-            category.ClampMemberHistory();
-        SetupGlucose([]);
-        SetupEmptyTreatments();
-
-        var result = await CreateController(cacheService: cache.Object, categoryReadContext: category)
-            .GetMultiPeriodStatistics();
-
-        result.Result.Should().BeOfType<OkObjectResult>().Subject.Value.Should().NotBeSameAs(cached);
-        cache.Invocations.Should().BeEmpty();
-    }
-
-    /// <summary>
-    /// A share with full history is not clamped, but the categories it was granted decide what the
-    /// statistics count (sensor warm-ups need device events), and the key carries only the tenant.
-    /// </summary>
-    [Fact]
-    public async Task GetMultiPeriodStatistics_FullHistoryShare_NeitherReadsNorWritesTheCache()
-    {
-        var cached = new MultiPeriodStatistics();
-        var cache = new Mock<ICacheService>();
-        cache.Setup(c => c.GetAsync<MultiPeriodStatistics>(It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(cached);
-        var category = new CategoryReadContext();
-        category.MarkShare();
-        category.SetFullHistory(true);
-        SetupGlucose([]);
-        SetupEmptyTreatments();
-
-        var result = await CreateController(cacheService: cache.Object, categoryReadContext: category)
-            .GetMultiPeriodStatistics();
-
-        result.Result.Should().BeOfType<OkObjectResult>().Subject.Value.Should().NotBeSameAs(cached);
-        cache.Invocations.Should().BeEmpty();
     }
 }

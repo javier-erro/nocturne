@@ -4,6 +4,7 @@ using Nocturne.API.Services.Devices;
 using Nocturne.API.Attributes;
 using Nocturne.API.Extensions;
 using Nocturne.API.Services.Analytics;
+using Nocturne.API.Services.Caching;
 using Nocturne.Core.Models.Authorization;
 using Nocturne.Core.Constants;
 using Nocturne.Core.Contracts.Analytics;
@@ -15,7 +16,6 @@ using Nocturne.Core.Contracts.V4.Repositories;
 using Nocturne.Core.Models;
 using Nocturne.Core.Models.Basal;
 using Nocturne.Core.Models.V4;
-using Nocturne.Infrastructure.Cache.Abstractions;
 using OpenApi.Remote.Attributes;
 
 namespace Nocturne.API.Controllers.V4.Analytics;
@@ -55,7 +55,7 @@ public class StatisticsController : ControllerBase
     public const int ComputeBodyLimitBytes = 100 * 1024 * 1024;
 
     private readonly IStatisticsService _statisticsService;
-    private readonly ICacheService _cacheService;
+    private readonly ITenantCache _cache;
     private readonly IProfileProjectionService _profileProjectionService;
     private readonly IBasalRateResolver _basalRateResolver;
     private readonly IBasalSegmentService _basalSegments;
@@ -64,7 +64,6 @@ public class StatisticsController : ControllerBase
     private readonly IBolusRepository _bolusRepository;
     private readonly ICarbIntakeRepository _carbIntakeRepository;
     private readonly ITempBasalRepository _tempBasalRepository;
-    private readonly ITenantAccessor _tenantAccessor;
     private readonly IAidMetricsService _aidMetricsService;
     private readonly IPatientDeviceRepository _patientDeviceRepository;
     private readonly IApsSnapshotRepository _apsSnapshotRepository;
@@ -76,13 +75,9 @@ public class StatisticsController : ControllerBase
     private readonly ICategoryReadContext _categoryReadContext;
     private readonly ILogger<StatisticsController> _logger;
 
-    private string TenantCacheId =>
-        _tenantAccessor.Context?.TenantId.ToString()
-        ?? throw new InvalidOperationException("Tenant context is not resolved");
-
     public StatisticsController(
         IStatisticsService statisticsService,
-        ICacheService cacheService,
+        ITenantCache cache,
         IProfileProjectionService profileProjectionService,
         IBasalRateResolver basalRateResolver,
         IBasalSegmentService basalSegments,
@@ -91,7 +86,6 @@ public class StatisticsController : ControllerBase
         IBolusRepository bolusRepository,
         ICarbIntakeRepository carbIntakeRepository,
         ITempBasalRepository tempBasalRepository,
-        ITenantAccessor tenantAccessor,
         IAidMetricsService aidMetricsService,
         IPatientDeviceRepository patientDeviceRepository,
         IApsSnapshotRepository apsSnapshotRepository,
@@ -105,7 +99,7 @@ public class StatisticsController : ControllerBase
     )
     {
         _statisticsService = statisticsService;
-        _cacheService = cacheService;
+        _cache = cache;
         _profileProjectionService = profileProjectionService;
         _basalRateResolver = basalRateResolver;
         _basalSegments = basalSegments;
@@ -114,7 +108,6 @@ public class StatisticsController : ControllerBase
         _bolusRepository = bolusRepository;
         _carbIntakeRepository = carbIntakeRepository;
         _tempBasalRepository = tempBasalRepository;
-        _tenantAccessor = tenantAccessor;
         _aidMetricsService = aidMetricsService;
         _patientDeviceRepository = patientDeviceRepository;
         _apsSnapshotRepository = apsSnapshotRepository;
@@ -805,15 +798,9 @@ public class StatisticsController : ControllerBase
         CancellationToken cancellationToken = default
     )
     {
-        var cacheKey = $"statistics:multi-period:{TenantCacheId}";
+        const string cacheKey = "statistics:multi-period";
 
-        // A history-clamped request bypasses the cache, for the reason given on
-        // EntryCacheAdapter. So does a share: its categories decide what the body counts, and the key
-        // carries only the tenant.
-        var useCache = !_categoryReadContext.IsHistoryClamped && !_categoryReadContext.IsShare;
-        var cachedResult = useCache
-            ? await _cacheService.GetAsync<MultiPeriodStatistics>(cacheKey, cancellationToken)
-            : null;
+        var cachedResult = await _cache.GetAsync<MultiPeriodStatistics>(cacheKey, cancellationToken);
         if (cachedResult != null)
         {
             return Ok(cachedResult);
@@ -963,8 +950,7 @@ public class StatisticsController : ControllerBase
         // Cache for 5 minutes — long enough to absorb rapid dashboard refreshes,
         // short enough that newly-imported connector data (basal StateSpans, etc.) appears promptly.
         var expiry = DateTime.UtcNow.AddMinutes(5);
-        if (useCache)
-            await _cacheService.SetAsync(cacheKey, result, expiry, cancellationToken);
+        await _cache.SetAsync(cacheKey, result, expiry, cancellationToken);
 
         return Ok(result);
     }

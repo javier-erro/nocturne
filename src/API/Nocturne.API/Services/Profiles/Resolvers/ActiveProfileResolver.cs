@@ -1,26 +1,23 @@
 using System.Globalization;
 using System.Text.Json;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Nocturne.Core.Contracts.Glucose;
-using Nocturne.Core.Contracts.Multitenancy;
 using Nocturne.Core.Contracts.Profiles.Resolvers;
 using Nocturne.Core.Models;
 using Nocturne.Core.Models.V4;
+using Nocturne.API.Services.Caching;
 
 namespace Nocturne.API.Services.Profiles.Resolvers;
 
 /// <summary>
 /// Resolves the active profile name and CircadianPercentageProfile adjustments at a given time
 /// by querying Profile <see cref="StateSpan"/> records via <see cref="IStateSpanService"/>.
-/// Results are cached per tenant with a 5-second TTL, keyed by minute-rounded time.
+/// Results are cached in <see cref="ITenantCache"/> with a 5-second TTL, keyed by minute-rounded time.
 /// </summary>
 internal sealed class ActiveProfileResolver : IActiveProfileResolver
 {
     private readonly IStateSpanService _stateSpanService;
-    private readonly ITenantAccessor _tenantAccessor;
-    private readonly IMemoryCache _cache;
-    private readonly ICategoryReadContext _categoryReadContext;
+    private readonly ITenantCache _cache;
     private readonly ILogger<ActiveProfileResolver> _logger;
 
     private const int CacheTtlSeconds = 5;
@@ -28,15 +25,11 @@ internal sealed class ActiveProfileResolver : IActiveProfileResolver
 
     public ActiveProfileResolver(
         IStateSpanService stateSpanService,
-        ITenantAccessor tenantAccessor,
-        IMemoryCache cache,
-        ICategoryReadContext categoryReadContext,
+        ITenantCache cache,
         ILogger<ActiveProfileResolver> logger)
     {
         _stateSpanService = stateSpanService;
-        _tenantAccessor = tenantAccessor;
         _cache = cache;
-        _categoryReadContext = categoryReadContext;
         _logger = logger;
     }
 
@@ -83,18 +76,12 @@ internal sealed class ActiveProfileResolver : IActiveProfileResolver
         return ExtractInsulinContext(span);
     }
 
-    /// <remarks>
-    /// The cache is keyed by tenant, not history window, so a history-clamped request, which sees
-    /// only the last 24 hours of <c>state_spans</c>, neither reads nor writes it.
-    /// </remarks>
     private async Task<StateSpan?> GetActiveProfileSpanAsync(long timeMills, CancellationToken ct)
     {
         var minuteRounded = timeMills / MillisPerMinute * MillisPerMinute;
-        var tenantId = _tenantAccessor.TenantId;
-        var cacheKey = $"ActiveProfile:{tenantId}:{minuteRounded}";
-        var useCache = !_categoryReadContext.IsHistoryClamped;
+        var cacheKey = $"active-profile:{minuteRounded}";
 
-        if (useCache && _cache.TryGetValue(cacheKey, out StateSpan? cached))
+        if (_cache.TryGetLocal(cacheKey, out StateSpan? cached))
             return cached;
 
         var queryTime = DateTimeOffset.FromUnixTimeMilliseconds(timeMills).UtcDateTime;
@@ -114,8 +101,7 @@ internal sealed class ActiveProfileResolver : IActiveProfileResolver
             .OrderByDescending(s => s.StartMills)
             .FirstOrDefault();
 
-        if (useCache)
-            _cache.Set(cacheKey, activeSpan, TimeSpan.FromSeconds(CacheTtlSeconds));
+        _cache.SetLocal(cacheKey, activeSpan, TimeSpan.FromSeconds(CacheTtlSeconds));
 
         return activeSpan;
     }

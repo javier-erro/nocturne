@@ -13,6 +13,7 @@ using Nocturne.Core.Models;
 using Nocturne.Core.Models.V4;
 using Nocturne.Tests.Shared.Mocks;
 using Xunit;
+using Nocturne.API.Tests.Infrastructure;
 
 namespace Nocturne.API.Tests.Services.ChartData.Stages;
 
@@ -70,8 +71,7 @@ public class IobCobComputeStageTests
             _mockCobCalculator.Object,
             _mockBasalSeriesBuilder.Object,
             _mockTherapyTimelineResolver.Object,
-            _cache,
-            MockTenantAccessor.Create().Object,
+            TestTenantCache.Create(_cache),
             NullLogger<IobCobComputeStage>.Instance
         );
     }
@@ -270,7 +270,7 @@ public class IobCobComputeStageTests
 
         var stage = new IobCobComputeStage(
             realIob, realCob, basalSeriesBuilder.Object, timelineResolver.Object,
-            _cache, MockTenantAccessor.Create().Object, NullLogger<IobCobComputeStage>.Instance);
+            TestTenantCache.Create(_cache), NullLogger<IobCobComputeStage>.Instance);
 
         var context = new ChartDataContext
         {

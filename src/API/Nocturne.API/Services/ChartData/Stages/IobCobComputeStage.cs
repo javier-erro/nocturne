@@ -1,12 +1,11 @@
 using System.Security.Cryptography;
 using System.Text;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Nocturne.Core.Contracts.Analytics;
 using Nocturne.Core.Contracts.Profiles.Resolvers;
 using Nocturne.Core.Contracts.Treatments;
-using Nocturne.Core.Contracts.Multitenancy;
 using Nocturne.Core.Contracts.V4.Repositories;
+using Nocturne.API.Services.Caching;
 using Nocturne.API.Services.Treatments;
 using Nocturne.Core.Models;
 using Nocturne.Core.Models.V4;
@@ -32,10 +31,10 @@ namespace Nocturne.API.Services.ChartData.Stages;
 /// The DIA value is read from the loaded profile.
 /// </para>
 /// <para>
-/// Results are cached in <see cref="Microsoft.Extensions.Caching.Memory.IMemoryCache"/> for
-/// one minute. The cache key is a 64-bit SHA-256 prefix of the treatment fingerprint (mills,
-/// insulin, carbs, temp basal rate) combined with the tenant ID, rounded time boundaries,
-/// and interval. The tenant ID component prevents cross-tenant cache leakage.
+/// Results are cached in the local tier of <see cref="ITenantCache"/> for one minute. The cache
+/// key is a 64-bit SHA-256 prefix of every input the series depends on (treatments, temp basals,
+/// APS snapshots and the therapy values at each tick) combined with the rounded time boundaries
+/// and interval.
 /// </para>
 /// <para>
 /// Basal series construction is delegated to <see cref="IBasalSeriesBuilder"/>, which uses
@@ -56,15 +55,11 @@ internal sealed class IobCobComputeStage(
     ICobCalculator cobCalculator,
     IBasalSeriesBuilder basalSeriesBuilder,
     ITherapyTimelineResolver therapyTimelineResolver,
-    IMemoryCache cache,
-    ITenantAccessor tenantAccessor,
+    ITenantCache cache,
     ILogger<IobCobComputeStage> logger
 ) : IChartDataStage
 {
     private static readonly TimeSpan IobCobCacheExpiration = TimeSpan.FromMinutes(1);
-
-    private string TenantCacheId => tenantAccessor.Context?.TenantId.ToString()
-        ?? throw new InvalidOperationException("Tenant context is not resolved");
 
     public async Task<ChartDataContext> ExecuteAsync(ChartDataContext context, CancellationToken cancellationToken)
     {
@@ -122,11 +117,11 @@ internal sealed class IobCobComputeStage(
     {
 
         // Generate cache key based on data hash and time range
-        var cacheKey = GenerateIobCobCacheKey(boluses, carbIntakes, startTime, endTime, intervalMinutes, tempBasals, apsSnapshots);
+        var cacheKey = GenerateIobCobCacheKey(boluses, carbIntakes, startTime, endTime, intervalMinutes, timeline, tempBasals, apsSnapshots);
 
         // Try to get from cache
         if (
-            cache.TryGetValue(
+            cache.TryGetLocal(
                 cacheKey,
                 out (
                     List<TimeSeriesPoint> iob,
@@ -291,7 +286,7 @@ internal sealed class IobCobComputeStage(
 
         // Cache the result
         var result = (iobSeries, cobSeries, maxIob, maxCob);
-        cache.Set(cacheKey, result, IobCobCacheExpiration);
+        cache.SetLocal(cacheKey, result, IobCobCacheExpiration);
 
         return result;
     }
@@ -299,14 +294,14 @@ internal sealed class IobCobComputeStage(
     /// <summary>
     /// Generate a cache key for IOB/COB calculations based on data fingerprint and time range.
     /// Uses SHA256 of individual bolus/carb intake mills and values for collision resistance.
-    /// Includes tenant ID to prevent cross-tenant cache leakage.
     /// </summary>
-    private string GenerateIobCobCacheKey(
+    private static string GenerateIobCobCacheKey(
         List<Bolus> boluses,
         List<CarbIntake> carbIntakes,
         long startTime,
         long endTime,
         int intervalMinutes,
+        TherapyTimeline timeline,
         List<TempBasal>? tempBasals = null,
         IReadOnlyList<ApsIobCobPoint>? apsSnapshots = null
     )
@@ -357,11 +352,28 @@ internal sealed class IobCobComputeStage(
             }
         }
 
+        for (var t = roundedStart; t <= roundedEnd; t += intervalMs)
+        {
+            var therapy = timeline.SnapshotAt(t);
+            sb.Append(therapy.Dia)
+                .Append(':')
+                .Append(therapy.PeakMinutes)
+                .Append(':')
+                .Append(therapy.CarbsPerHour)
+                .Append(':')
+                .Append(therapy.SensitivityAt(t))
+                .Append(':')
+                .Append(therapy.CarbRatioAt(t))
+                .Append(':')
+                .Append(therapy.BasalRateAt(t))
+                .Append('|');
+        }
+
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())))[
             ..16
         ]; // First 16 hex chars (64 bits) is sufficient
 
-        return $"iobcob:{TenantCacheId}:{hash}:{roundedStart}:{roundedEnd}:{intervalMinutes}";
+        return $"iobcob:{hash}:{roundedStart}:{roundedEnd}:{intervalMinutes}";
     }
 
 }

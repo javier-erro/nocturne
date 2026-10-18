@@ -186,6 +186,7 @@ public static class ServiceCollectionExtensions
         // Per-request public-share category context, read by the factory and the scoped
         // context above to stamp the RLS carrier properties.
         services.AddScoped<ICategoryReadContext, CategoryReadContext>();
+        services.AddScoped<IReaderCachePartition, ReaderCachePartition>();
 
         // Register tenant-aware context factory for V4 repositories
         services.AddScoped<ITenantDbContextFactory, TenantDbContextFactory>();

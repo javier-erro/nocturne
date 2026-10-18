@@ -1,7 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Nocturne.API.Services.Auth;
-using Nocturne.Infrastructure.Cache.Abstractions;
-using Nocturne.Infrastructure.Cache.Keys;
+using Nocturne.API.Services.Caching;
 using Nocturne.Core.Contracts.Multitenancy;
 using Nocturne.Core.Models.Authorization;
 using Nocturne.Infrastructure.Data;
@@ -52,14 +51,14 @@ public sealed class DemoTenantService
     private readonly IDbContextFactory<NocturneDbContext> _factory;
     private readonly ITenantService _tenantService;
     private readonly PublicAccessCacheService _publicAccessCache;
-    private readonly ICacheService _cache;
+    private readonly ITenantCache _cache;
     private readonly ILogger<DemoTenantService> _logger;
 
     public DemoTenantService(
         IDbContextFactory<NocturneDbContext> factory,
         ITenantService tenantService,
         PublicAccessCacheService publicAccessCache,
-        ICacheService cache,
+        ITenantCache cache,
         ILogger<DemoTenantService> logger)
     {
         _factory = factory;
@@ -199,10 +198,9 @@ public sealed class DemoTenantService
         // them; the outgoing demo member has to be retired explicitly.
         await RetireDemoMemberAsync(outgoingMemberSubjectId, ct);
 
-        // Read paths cache recent entries and treatments in process, keyed by tenant id.
-        // The wipe empties the tables but not those caches, so without this the demo keeps
+        // The wipe empties the tables but not the tenant cache, so without this the demo keeps
         // serving the data it just deleted until each entry's TTL expires.
-        await InvalidateReadCachesAsync(tenantId.Value, ct);
+        await _cache.RemoveTenantAsync(tenantId.Value, ct);
 
         // Re-seed roles, the Public membership and the bundled OAuth clients, then
         // re-apply the demo tenant's own grants on top.
@@ -211,17 +209,6 @@ public sealed class DemoTenantService
 
         _logger.LogInformation("Demo tenant {TenantId} reset: data and configuration cleared", tenantId);
         return tenantId;
-    }
-
-    /// <summary>
-    /// Drops the cached recent-entry and recent-treatment reads for the tenant. The cache is
-    /// keyed by tenant id, so this touches nothing belonging to another tenant.
-    /// </summary>
-    private async Task InvalidateReadCachesAsync(Guid tenantId, CancellationToken ct)
-    {
-        var id = tenantId.ToString();
-        await _cache.RemoveByPatternAsync(CacheKeyBuilder.BuildRecentEntriesPattern(id), ct);
-        await _cache.RemoveByPatternAsync(CacheKeyBuilder.BuildRecentTreatmentsPattern(id), ct);
     }
 
     private async Task<Guid?> FindDemoTenantIdAsync(CancellationToken ct)
