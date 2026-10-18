@@ -25,8 +25,9 @@ public class OAuthGrantService : IOAuthGrantService
     /// Initialises a new <see cref="OAuthGrantService"/>.
     /// </summary>
     /// <param name="dbContext">Database context for grant persistence.</param>
-    /// <param name="dbContextFactory">Factory used by <see cref="IsGrantRevokedAsync"/>, which runs
-    /// during authentication and so cannot rely on the scoped context being tenant-pinned yet.</param>
+    /// <param name="dbContextFactory">Factory used by <see cref="IsGrantRevokedAsync"/>, which pins
+    /// the token's tenant rather than reading its scope's: it runs inside the authentication handlers,
+    /// which may hold a scope with no tenant resolved.</param>
     /// <param name="clientService">Used to resolve client metadata (currently unused in this implementation).</param>
     /// <param name="guestSessionCache">Cache evicted when a grant's scopes are narrowed.</param>
     /// <param name="grantRevocation">Applies the consequences of a revoke.</param>
