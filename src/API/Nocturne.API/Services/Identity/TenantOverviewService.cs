@@ -9,6 +9,7 @@ using Nocturne.Core.Models.V4;
 using Nocturne.Infrastructure.Data;
 using Nocturne.Infrastructure.Data.Entities;
 using Nocturne.Infrastructure.Data.Extensions;
+using Nocturne.Infrastructure.Data.Services;
 
 namespace Nocturne.API.Services.Identity;
 
@@ -108,20 +109,20 @@ public class TenantOverviewService : ITenantOverviewService
         CancellationToken ct)
     {
         // Fresh scope per tenant: CanonicalGlucoseService caches per scope. The scope never passes
-        // through MemberScopeMiddleware, so the caller's clamp on this tenant is carried in here.
-        SensorGlucose? latest;
-        using (var scope = _scopeFactory.CreateScope())
-        {
-            scope.ServiceProvider.GetRequiredService<ITenantAccessor>()
-                .SetTenant(new TenantContext(tenant.Id, tenant.Slug, tenant.DisplayName, true, tenant.IsDemo));
-            if (historyClamped)
-                scope.ServiceProvider.GetRequiredService<ICategoryReadContext>().ClampMemberHistory();
-            latest = await scope.ServiceProvider
-                .GetRequiredService<ICanonicalGlucoseService>()
-                .GetLatestAsync(ct);
-        }
+        // through MemberScopeMiddleware, so the caller's clamp on this tenant is carried in here,
+        // and every read below goes through it so the clamp and the tenant pin travel together.
+        using var scope = _scopeFactory.CreateScope();
+        scope.ServiceProvider.GetRequiredService<ITenantAccessor>()
+            .SetTenant(new TenantContext(tenant.Id, tenant.Slug, tenant.DisplayName, true, tenant.IsDemo));
+        if (historyClamped)
+            scope.ServiceProvider.GetRequiredService<ICategoryReadContext>().ClampMemberHistory();
+        var latest = await scope.ServiceProvider
+            .GetRequiredService<ICanonicalGlucoseService>()
+            .GetLatestAsync(ct);
 
-        await using var db = await _factory.CreateTenantPinnedContextAsync(tenant.Id, ct);
+        await using var db = await scope.ServiceProvider
+            .GetRequiredService<ITenantDbContextFactory>()
+            .CreateAsync(ct);
 
         int? activeAlertCount = null;
         AlertRuleSeverity? highestSeverity = null;
