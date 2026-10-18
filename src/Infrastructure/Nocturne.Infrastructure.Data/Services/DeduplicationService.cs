@@ -1,4 +1,3 @@
-using Nocturne.Core.Contracts.Audit;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
@@ -7,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Nocturne.Core.Constants;
+using Nocturne.Core.Contracts.Audit;
 using Nocturne.Core.Contracts.Infrastructure;
 using Nocturne.Core.Contracts.Multitenancy;
 using Nocturne.Core.Models;
@@ -23,9 +23,9 @@ namespace Nocturne.Infrastructure.Data.Services;
 /// </summary>
 public class DeduplicationService : IDeduplicationService
 {
-    private readonly NocturneDbContext _context;
     private const string JobAuditEndpoint = "service:deduplication";
 
+    private readonly NocturneDbContext _context;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ICategoryReadContext? _categoryReadContext;
     private readonly ILogger<DeduplicationService> _logger;
