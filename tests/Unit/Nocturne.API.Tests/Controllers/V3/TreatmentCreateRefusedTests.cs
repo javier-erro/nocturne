@@ -73,6 +73,24 @@ public class TreatmentCreateRefusedTests
         body.GetProperty("deduplicatedIdentifier").GetString().Should().Be(MongoObjectId.Coerce(deletedRecord));
     }
 
+    /// <summary>
+    /// A treatment of an event type Nocturne does not store is settled without a write, and answered
+    /// as created under the id it was sent with, as Nightscout answers it.
+    /// </summary>
+    [Fact]
+    public async Task Create_OfAnUnstoredEventType_AnswersAsCreated()
+    {
+        var controller = CreateController(new BulkWrite<Treatment>([], skippedDeleted: 0)
+        {
+            Settled = [new Treatment { Id = SyncIdentifier, EventType = "" }],
+        });
+
+        var response = await controller.CreateTreatment(new Treatment { Id = SyncIdentifier, EventType = "" });
+
+        response.Result.Should().BeOfType<CreatedAtActionResult>()
+            .Which.Value.Should().BeOfType<Treatment>().Which.Id.Should().Be(SyncIdentifier);
+    }
+
     [Fact]
     public async Task Create_ThatWroteNothingForAnotherReason_StillFails()
     {

@@ -251,6 +251,10 @@ public class TreatmentsController : BaseV3Controller<Treatment>
                 );
             }
 
+            // A treatment of an event type Nocturne does not store is settled without a write; it is
+            // answered as created, as Nightscout, which stores any eventType, answers it.
+            createdTreatment ??= created.Settled.FirstOrDefault();
+
             if (createdTreatment == null)
             {
                 return CreateV3ErrorResponse(
