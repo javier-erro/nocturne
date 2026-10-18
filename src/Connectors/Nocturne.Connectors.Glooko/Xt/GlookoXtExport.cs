@@ -74,8 +74,10 @@ public static class GlookoXtExportParser
             var cells = SplitRow(line);
             if (dateCol < 0 || dateCol >= cells.Count) continue;
 
-            if (!DateTime.TryParseExact(cells[dateCol].Trim(), DateFormat, CultureInfo.InvariantCulture,
-                    DateTimeStyles.None, out var local))
+            // The format carries no offset, so this yields an unspecified wall-clock time in the
+            // export's zone, converted to UTC through that zone below; the host zone never applies.
+            if (!DateTime.TryParseExact(cells[dateCol], DateFormat, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AllowWhiteSpaces, out var local))
                 continue;
 
             var utc = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(local, DateTimeKind.Unspecified), zone);
