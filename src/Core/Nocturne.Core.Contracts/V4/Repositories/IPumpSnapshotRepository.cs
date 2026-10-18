@@ -24,7 +24,6 @@ public interface IPumpSnapshotRepository : ILegacyKeyedRepository<PumpSnapshot>
     /// <param name="limit">Maximum number of records to return (default 100).</param>
     /// <param name="offset">Number of records to skip for pagination (default 0).</param>
     /// <param name="descending">When <c>true</c>, results are ordered newest-first (default).</param>
-    /// <param name="ct">Cancellation token.</param>
     new Task<IEnumerable<PumpSnapshot>> GetAsync(DateTime? from, DateTime? to, string? device, string? source, int limit = 100, int offset = 0, bool descending = true, CancellationToken ct = default);
 
     /// <summary>
@@ -36,7 +35,6 @@ public interface IPumpSnapshotRepository : ILegacyKeyedRepository<PumpSnapshot>
 
     /// <summary>Retrieve <see cref="PumpSnapshot"/> records matching any of the given correlation IDs.</summary>
     /// <param name="correlationIds">Correlation IDs to match.</param>
-    /// <param name="ct">Cancellation token.</param>
     Task<IEnumerable<PumpSnapshot>> GetByCorrelationIdsAsync(IEnumerable<Guid> correlationIds, CancellationToken ct = default);
 
     /// <summary>
@@ -49,7 +47,6 @@ public interface IPumpSnapshotRepository : ILegacyKeyedRepository<PumpSnapshot>
     /// Use <see cref="GetLatestAsync"/> for inclusive freshness reads.
     /// </remarks>
     /// <param name="timestamp">Exclusive upper bound on Timestamp.</param>
-    /// <param name="ct">Cancellation token.</param>
     Task<PumpSnapshot?> GetLatestBeforeAsync(DateTime timestamp, CancellationToken ct = default);
 
     /// <summary>
@@ -62,7 +59,6 @@ public interface IPumpSnapshotRepository : ILegacyKeyedRepository<PumpSnapshot>
     /// </remarks>
     /// <param name="asOf">When non-null, restricts to snapshots with <c>Timestamp &lt;= asOf</c>;
     /// when <c>null</c>, returns the absolute latest.</param>
-    /// <param name="ct">Cancellation token.</param>
     Task<PumpSnapshot?> GetLatestAsync(DateTime? asOf, CancellationToken ct = default);
 
     /// <summary>
@@ -72,6 +68,5 @@ public interface IPumpSnapshotRepository : ILegacyKeyedRepository<PumpSnapshot>
     /// <see cref="PumpSnapshot.DataSource"/> are considered.
     /// </summary>
     /// <param name="source">Optional connector data source filter.</param>
-    /// <param name="ct">Cancellation token.</param>
     Task<DateTime?> GetLatestTimestampAsync(string? source = null, CancellationToken ct = default);
 }

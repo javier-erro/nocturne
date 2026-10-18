@@ -21,6 +21,5 @@ public interface IDeviceEventReactor
 {
     /// <summary>Reacts to device events that were just created.</summary>
     /// <param name="created">The newly created events, in no particular order.</param>
-    /// <param name="ct">Cancellation token.</param>
     Task OnCreatedAsync(IReadOnlyList<DeviceEvent> created, CancellationToken ct = default);
 }

@@ -14,7 +14,6 @@ public interface ICompressionLowService
     /// </summary>
     /// <param name="status">Filter by <see cref="CompressionLowStatus"/>, or null to return all statuses.</param>
     /// <param name="nightOf">Filter to a specific night, or null to return all nights.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Matching compression-low suggestions.</returns>
     Task<IEnumerable<CompressionLowSuggestion>> GetSuggestionsAsync(
         CompressionLowStatus? status = null,
@@ -39,9 +38,6 @@ public interface ICompressionLowService
         long endMills,
         CancellationToken cancellationToken = default);
 
-    /// <summary>
-    /// Dismiss a suggestion
-    /// </summary>
     /// <exception cref="InvalidOperationException">Thrown when the suggestion is not found or is not pending.</exception>
     Task DismissSuggestionAsync(
         Guid id,
