@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Nocturne.Core.Models;
 
 /// <summary>
@@ -74,6 +76,7 @@ public class AlexaResponseBody
 {
     public AlexaOutputSpeech? OutputSpeech { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
     public bool ShouldEndSession { get; set; } = true;
 
     public AlexaCard? Card { get; set; }
