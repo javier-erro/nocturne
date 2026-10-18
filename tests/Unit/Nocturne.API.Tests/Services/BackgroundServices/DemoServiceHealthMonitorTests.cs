@@ -1,4 +1,3 @@
-using Nocturne.Infrastructure.Data.Services;
 using System.Net;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -10,6 +9,7 @@ using Nocturne.Core.Contracts.Audit;
 using Nocturne.Core.Contracts.Connectors;
 using Nocturne.Core.Models.Services;
 using Nocturne.Infrastructure.Data;
+using Nocturne.Tests.Shared.Infrastructure;
 
 namespace Nocturne.API.Tests.Services.BackgroundServices;
 
@@ -34,10 +34,7 @@ public class DemoServiceHealthMonitorTests
         services.AddScoped(sp => new NocturneDbContext(
             new DbContextOptionsBuilder<NocturneDbContext>()
                 .UseSqlite("Filename=:memory:")
-                .Options)
-        {
-            ReadContext = new TenantReadContext(null, null, sp.GetRequiredService<IAuditContext>()),
-        });
+                .Options).AttributedTo(sp.GetRequiredService<IAuditContext>()));
         services.AddScoped<IDataSourceService>(sp =>
         {
             var ambient = sp.GetRequiredService<IAuditContext>();

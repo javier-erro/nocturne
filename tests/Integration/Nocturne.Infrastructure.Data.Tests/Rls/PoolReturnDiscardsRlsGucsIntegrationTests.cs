@@ -1,6 +1,7 @@
 using System.Data.Common;
 using Nocturne.Infrastructure.Data.Interceptors;
 using Nocturne.Infrastructure.Data.Services;
+using Nocturne.Tests.Shared.Infrastructure;
 using Npgsql;
 
 namespace Nocturne.Infrastructure.Data.Tests.Rls;
@@ -57,10 +58,9 @@ public class PoolReturnDiscardsRlsGucsIntegrationTests
         // Lease 1 - a share-flagged, category-restricted context. Every GUC is on the session.
         await using (var share = new NocturneDbContext(options)
         {
-            ReadContext = new TenantReadContext(null, shareReader, null),
             TenantId = shareTenant,
             SubjectId = shareSubject,
-        })
+        }.ReadingFrom(reader: shareReader))
         {
             var connection = await OpenAsync(share);
             backendPid = Convert.ToInt32(await ScalarAsync(connection, "SELECT pg_backend_pid()"));

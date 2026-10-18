@@ -1,4 +1,3 @@
-using Nocturne.Infrastructure.Data.Services;
 using Microsoft.AspNetCore.Http;
 using Nocturne.Core.Contracts.Audit;
 using Nocturne.Infrastructure.Data.Entities.V4;
@@ -42,7 +41,7 @@ public class UpstreamFingerprintSaveTests : IDisposable
 
         await using (var ctx = _db.CreateContext())
         {
-            ctx.ReadContext = new TenantReadContext(null, null, new UserAuditContext());
+            ctx.AttributedTo(new UserAuditContext());
             (await ctx.CarbIntakes.SingleAsync(c => c.Id == id)).Carbs = 50;
             using (Scope(Connector, "fingerprint-value"))
                 await ctx.SaveChangesAsync();

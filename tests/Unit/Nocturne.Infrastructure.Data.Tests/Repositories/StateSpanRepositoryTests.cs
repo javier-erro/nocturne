@@ -1,4 +1,3 @@
-using Nocturne.Infrastructure.Data.Services;
 using FluentAssertions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -51,7 +50,7 @@ public class StateSpanRepositoryTests : IDisposable
             .SeedTenant(OtherTenantId, "other");
 
         _context = _db.CreateContext();
-        _context.ReadContext = new TenantReadContext(null, null, _auditContext);
+        _context.AttributedTo(_auditContext);
         _mockDedup = new Mock<IDeduplicationService>();
         _logger.Setup(l => l.IsEnabled(It.IsAny<LogLevel>())).Returns(true);
         _repository = new StateSpanRepository(

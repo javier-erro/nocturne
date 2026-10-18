@@ -1,4 +1,3 @@
-using Nocturne.Infrastructure.Data.Services;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Http;
@@ -32,7 +31,7 @@ public class FoodHistoryTests : IDisposable
         _db = TestDbContextFactory.CreateSqliteWithTenant(
             TenantId, "test", new MutationAuditInterceptor());
         _context = _db.CreateContext();
-        _context.ReadContext = new TenantReadContext(null, null, new UserAuditContext());
+        _context.AttributedTo(new UserAuditContext());
         _foods = new FoodRepository(_context, NullLogger<FoodRepository>.Instance);
     }
 

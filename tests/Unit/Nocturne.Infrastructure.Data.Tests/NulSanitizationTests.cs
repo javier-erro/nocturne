@@ -1,4 +1,3 @@
-using Nocturne.Infrastructure.Data.Services;
 using FluentAssertions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -133,7 +132,7 @@ public class NulSanitizationTests : IDisposable
 
         await using (var ctx = _db.CreateContext())
         {
-            ctx.ReadContext = new TenantReadContext(null, null, new UserAuditContext());
+            ctx.AttributedTo(new UserAuditContext());
             var reading = await ctx.MeterGlucose.SingleAsync(r => r.Id == id);
             reading.Device = "iPhone" + Nul;
             await ctx.SaveChangesAsync();

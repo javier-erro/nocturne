@@ -24,7 +24,6 @@ using Nocturne.Core.Models.V4;
 using Nocturne.Infrastructure.Data;
 using Nocturne.Infrastructure.Data.Interceptors;
 using Nocturne.Infrastructure.Data.Repositories.V4;
-using Nocturne.Infrastructure.Data.Services;
 using Nocturne.Tests.Shared.Infrastructure;
 using Npgsql;
 using Xunit;
@@ -74,12 +73,12 @@ public class EntryServiceDeletePostgresTests(EntryServiceDeletePostgresTests.Dat
         Func<NocturneDbContext> Db);
 
     private NocturneDbContext Context(Guid tenant) =>
-        new(new DbContextOptionsBuilder<NocturneDbContext>()
+        new NocturneDbContext(new DbContextOptionsBuilder<NocturneDbContext>()
             .UseNpgsql(database.AppConnectionString, npgsql => npgsql.EnableRetryOnFailure(
                 maxRetryCount: 3, maxRetryDelay: TimeSpan.FromSeconds(1), errorCodesToAdd: null))
             .AddInterceptors(
                 new TenantConnectionInterceptor(), new MutationAuditInterceptor())
-            .Options) { TenantId = tenant, ReadContext = new TenantReadContext(null, null, _audit) };
+            .Options) { TenantId = tenant }.AttributedTo(_audit);
 
     private readonly IAuditContext _audit = Mock.Of<IAuditContext>();
 

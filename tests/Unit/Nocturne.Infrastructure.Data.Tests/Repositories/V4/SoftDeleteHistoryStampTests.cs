@@ -7,7 +7,6 @@ using Nocturne.Infrastructure.Data.Entities.V4;
 using Nocturne.Infrastructure.Data.Extensions;
 using Nocturne.Infrastructure.Data.Interceptors;
 using Nocturne.Infrastructure.Data.Repositories.V4;
-using Nocturne.Infrastructure.Data.Services;
 using Nocturne.Tests.Shared.Infrastructure;
 using Xunit;
 
@@ -445,7 +444,7 @@ public class SoftDeleteHistoryStampTests : IDisposable
         public override ValueTask<NocturneDbContext> CreateAsync(CancellationToken ct = default)
         {
             var ctx = db.CreateContext();
-            ctx.ReadContext = new TenantReadContext(null, null, audit);
+            ctx.AttributedTo(audit);
             return ValueTask.FromResult(ctx);
         }
     }

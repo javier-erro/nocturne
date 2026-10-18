@@ -1,4 +1,3 @@
-using Nocturne.Infrastructure.Data.Services;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 using System.Data.Common;
@@ -8,6 +7,7 @@ using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Nocturne.Core.Contracts.Audit;
 using Nocturne.Infrastructure.Data.Interceptors;
+using Nocturne.Tests.Shared.Infrastructure;
 
 namespace Nocturne.Infrastructure.Data.Tests.Interceptors;
 
@@ -149,7 +149,7 @@ public class MutationAuditInterceptorTests : IDisposable
     {
         var context = new TestNocturneDbContext(options ?? _contextOptions);
         context.TenantId = _tenantId;
-        context.ReadContext = new TenantReadContext(null, null, auditContext);
+        context.AttributedTo(auditContext);
         return context;
     }
 
@@ -404,7 +404,7 @@ public class MutationAuditInterceptorTests : IDisposable
         using var context2 = CreateContext();
         var auditContext = new Mock<IAuditContext>();
         auditContext.Setup(x => x.AuthType).Returns("Bearer");
-        context2.ReadContext = new TenantReadContext(null, null, auditContext.Object);
+        context2.AttributedTo(auditContext.Object);
 
         var tracked = await context2.TestAuditables.FindAsync(entity.Id);
         tracked!.DeletedAt = DateTime.UtcNow;
@@ -708,7 +708,7 @@ public class MutationAuditInterceptorTests : IDisposable
         // their provenance lives on the records themselves. Regression guard for the
         // mutation_audit_log firehose (~1.8M actorless rows/day) that filled prod disk.
         using var context = CreateContext();
-        context.ReadContext = new TenantReadContext(null, null, SystemAuditContext.ForService("service:demo-generator"));
+        context.AttributedTo(SystemAuditContext.ForService("service:demo-generator"));
 
         var entity = new TestAuditableEntity
         {
@@ -742,7 +742,7 @@ public class MutationAuditInterceptorTests : IDisposable
         await context.SaveChangesAsync();
 
         using var context2 = CreateContext();
-        context2.ReadContext = new TenantReadContext(null, null, SystemAuditContext.ForService("connector:dexcom"));
+        context2.AttributedTo(SystemAuditContext.ForService("connector:dexcom"));
         var tracked = await context2.TestAuditables.FindAsync(entity.Id);
         tracked!.DeletedAt = DateTime.UtcNow;
 

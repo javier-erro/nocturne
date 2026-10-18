@@ -1,5 +1,4 @@
 using Nocturne.Tests.Shared.Infrastructure;
-using Nocturne.Infrastructure.Data.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -73,9 +72,8 @@ public class TrackerAlertRuleBackfillServiceTests : IDisposable
         services.AddScoped(sp =>
         {
             var context = sp.GetRequiredService<IDbContextFactory<NocturneDbContext>>().CreateDbContext();
-            context.ReadContext = new TenantReadContext(
-                sp.GetRequiredService<ITenantAccessor>(), null, sp.GetRequiredService<IAuditContext>());
-            return context;
+            return context.ReadingFrom(
+                sp.GetRequiredService<ITenantAccessor>(), audit: sp.GetRequiredService<IAuditContext>());
         });
         services.AddScoped<IAuditContext, AuditContext>();
         services.AddScoped<ITenantAccessor, HttpContextTenantAccessor>();

@@ -1,4 +1,3 @@
-using Nocturne.Infrastructure.Data.Services;
 using FluentAssertions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
@@ -282,7 +281,7 @@ public class SaveChangesChangeDetectionTests : IDisposable
     private static NocturneDbContext NewAuditedContext(SqliteTestDatabase db)
     {
         var ctx = db.CreateContext();
-        ctx.ReadContext = new TenantReadContext(null, null, new StubAuditContext());
+        ctx.AttributedTo(new StubAuditContext());
         return ctx;
     }
 

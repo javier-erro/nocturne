@@ -1,4 +1,3 @@
-using Nocturne.Infrastructure.Data.Services;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -14,6 +13,7 @@ using Nocturne.Core.Contracts.Multitenancy;
 using Nocturne.Core.Models;
 using Nocturne.Core.Models.Alerts;
 using Nocturne.Infrastructure.Data;
+using Nocturne.Tests.Shared.Infrastructure;
 using Xunit;
 
 namespace Nocturne.API.Tests.Services.Alerts;
@@ -56,10 +56,7 @@ public class AlertSweepServiceAuditAttributionTests
             new DbContextOptionsBuilder<NocturneDbContext>()
                 .UseSqlite("DataSource=:memory:")
                 .ConfigureWarnings(w => w.Ignore(RelationalEventId.PendingModelChangesWarning))
-                .Options)
-        {
-            ReadContext = new TenantReadContext(null, null, sp.GetRequiredService<IAuditContext>()),
-        });
+                .Options).AttributedTo(sp.GetRequiredService<IAuditContext>()));
         services.AddScoped<IAlertOrchestrator>(sp =>
         {
             var orchestrator = new Mock<IAlertOrchestrator>();

@@ -1,4 +1,3 @@
-using Nocturne.Infrastructure.Data.Services;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -13,6 +12,7 @@ using Nocturne.Connectors.Core.Models;
 using Nocturne.Core.Contracts.Audit;
 using Nocturne.Core.Contracts.Multitenancy;
 using Nocturne.Infrastructure.Data;
+using Nocturne.Tests.Shared.Infrastructure;
 using Xunit;
 
 namespace Nocturne.API.Tests.Services.Connectors;
@@ -59,10 +59,7 @@ public class ConnectorSyncServiceTests
             new DbContextOptionsBuilder<NocturneDbContext>()
                 .UseSqlite("DataSource=:memory:")
                 .ConfigureWarnings(w => w.Ignore(RelationalEventId.PendingModelChangesWarning))
-                .Options)
-        {
-            ReadContext = new TenantReadContext(null, null, sp.GetRequiredService<IAuditContext>()),
-        });
+                .Options).AttributedTo(sp.GetRequiredService<IAuditContext>()));
 
         foreach (var executor in executors)
         {

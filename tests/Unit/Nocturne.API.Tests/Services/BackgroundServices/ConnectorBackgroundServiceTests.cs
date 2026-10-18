@@ -1,4 +1,3 @@
-using Nocturne.Infrastructure.Data.Services;
 using Nocturne.API.Multitenancy;
 using System.Collections.Concurrent;
 using System.Text.Json;
@@ -152,11 +151,8 @@ public class ConnectorBackgroundServiceTests
         services.AddActiveTenantSnapshot();
 
         services.AddScoped<ITenantAccessor, HttpContextTenantAccessor>();
-        services.AddScoped(sp => new NocturneDbContext(db.Options)
-        {
-            ReadContext = new TenantReadContext(
-                sp.GetRequiredService<ITenantAccessor>(), null, sp.GetRequiredService<IAuditContext>()),
-        });
+        services.AddScoped(sp => new NocturneDbContext(db.Options).ReadingFrom(
+            sp.GetRequiredService<ITenantAccessor>(), audit: sp.GetRequiredService<IAuditContext>()));
 
         services.AddScoped<IConnectorConfigurationService>(_ => configServiceMock.Object);
 

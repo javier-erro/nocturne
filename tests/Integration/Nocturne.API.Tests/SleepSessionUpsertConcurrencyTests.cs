@@ -134,7 +134,7 @@ public class SleepSessionUpsertConcurrencyTests : ApiIntegrationTestBase
         await using (var seed = Fixture.CreateDbContext(Fixture.TenantId))
             contexts = new TestNocturneDbContextFactory(seed);
         var held = await contexts.CreateAsync();
-        held.ReadContext = new TenantReadContext(null, null, firstAudit);
+        held.AttributedTo(firstAudit);
         var racer = await contexts.CreateAsync();
         Task<TSecond>? secondTask = null;
         try
