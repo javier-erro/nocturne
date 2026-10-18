@@ -1,8 +1,8 @@
-using Nocturne.Infrastructure.Data.Services;
 using Microsoft.EntityFrameworkCore;
 using Nocturne.Connectors.Core.Models;
 using Nocturne.Core.Contracts.Multitenancy;
 using Nocturne.Infrastructure.Data;
+using Nocturne.Infrastructure.Data.Services;
 
 namespace Nocturne.API.Services.Connectors;
 
@@ -21,7 +21,8 @@ namespace Nocturne.API.Services.Connectors;
 public interface IConnectorCursorResetService
 {
     /// <summary>
-    /// Resets the cursor for every configured connector belonging to <paramref name="tenantId"/>.
+    /// Resets the cursor for every configured connector belonging to <paramref name="tenantId"/>,
+    /// in a scope already opened on that tenant (<c>TenantJobScope.Open</c>).
     /// </summary>
     /// <param name="tenantId">The target tenant whose connectors should be re-pulled.</param>
     /// <param name="from">Optional lower bound. When null, all available history is re-ingested.</param>
@@ -145,9 +146,13 @@ public class ConnectorCursorResetService : IConnectorCursorResetService
         }
 
         // _db and the executor scope IConnectorSyncService.TriggerSyncAsync opens both read the
-        // tenant from the accessor.
-        _tenantAccessor.SetTenant(new TenantContext(
-            tenant.Id, tenant.Slug, tenant.DisplayName, tenant.IsActive, tenant.IsDemo));
+        // tenant from the accessor, so the caller opens this scope on the target tenant
+        // (TenantJobScope.Open); moving the accessor here would move every context of the scope.
+        if (_tenantAccessor.Context?.TenantId != tenantId)
+        {
+            throw new InvalidOperationException(
+                $"A cursor reset for tenant {tenantId} must run in a scope opened on that tenant.");
+        }
 
         var configs = await _db.ConnectorConfigurations.AsNoTracking()
             .Where(c => c.TenantId == tenantId)

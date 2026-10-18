@@ -3,11 +3,15 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
+using Nocturne.API.Multitenancy;
 using Nocturne.API.Services.Audit;
 using Nocturne.API.Services.Connectors;
 using Nocturne.Connectors.Core.Models;
 using Nocturne.Core.Contracts.Audit;
+using Nocturne.Core.Contracts.Multitenancy;
 using Nocturne.Infrastructure.Data;
+using Nocturne.Infrastructure.Data.Entities;
+using Nocturne.Infrastructure.Data.Extensions;
 using Xunit;
 
 namespace Nocturne.API.Tests.Services.Connectors;
@@ -36,13 +40,13 @@ public class ConnectorCursorResetJobServiceTests
     /// InMemory NocturneDbContext for job record persistence. Pass an existing provider to model a
     /// restarted process sharing the same database.
     /// </summary>
-    private static (ConnectorCursorResetJobService Service, IServiceProvider Provider) BuildService(
+    private (ConnectorCursorResetJobService Service, IServiceProvider Provider) BuildService(
         IConnectorCursorResetService engine,
         IServiceProvider? existingProvider = null)
         => BuildService(_ => engine, existingProvider);
 
     /// <inheritdoc cref="BuildService(IConnectorCursorResetService, IServiceProvider?)"/>
-    private static (ConnectorCursorResetJobService Service, IServiceProvider Provider) BuildService(
+    private (ConnectorCursorResetJobService Service, IServiceProvider Provider) BuildService(
         Func<IServiceProvider, IConnectorCursorResetService> engineFactory,
         IServiceProvider? existingProvider = null)
     {
@@ -52,12 +56,24 @@ public class ConnectorCursorResetJobServiceTests
             // Mirrors the production registration: the job's background scope marks its own
             // ambient audit context as system for the fan-out's duration.
             .AddScoped<IAuditContext, AuditContext>()
-            .AddDbContext<NocturneDbContext>(o => o.UseInMemoryDatabase(dbName))
+            .AddScoped<ITenantAccessor, HttpContextTenantAccessor>()
+            .AddDbContextFactory<NocturneDbContext>(o => o.UseInMemoryDatabase(dbName))
+            .AddDataServices()
             .BuildServiceProvider();
+
+        if (existingProvider is null)
+            SeedTenant(provider);
 
         var service = new ConnectorCursorResetJobService(
             NullLogger<ConnectorCursorResetJobService>.Instance, provider);
         return (service, provider);
+    }
+
+    private void SeedTenant(IServiceProvider provider)
+    {
+        using var db = provider.GetRequiredService<IDbContextFactory<NocturneDbContext>>().CreateDbContext();
+        db.Tenants.Add(new TenantEntity { Id = _tenantId, Slug = "erik", DisplayName = "Erik", IsActive = true });
+        db.SaveChanges();
     }
 
     private static async Task<ConnectorResetJobStatus> WaitForTerminalAsync(
@@ -158,7 +174,7 @@ public class ConnectorCursorResetJobServiceTests
     }
 
     [Fact]
-    public async Task StartResetAsync_AttributesTheBackgroundScopeToTheSystem()
+    public async Task StartResetAsync_OpensTheBackgroundScopeOnTheTenant_AttributedToTheSystem()
     {
         // The fan-out re-ingests connector data; none of it is a person editing records. Every
         // context the scope creates reads the scope's audit context, so it must say "system" or
@@ -172,6 +188,32 @@ public class ConnectorCursorResetJobServiceTests
 
         engine!.AmbientIsSystemMutation.Should().BeTrue();
         engine.AmbientEndpoint.Should().Be("service:connector-cursor-reset");
+        engine.ScopeTenant.Should().Be(_tenantId);
+    }
+
+    [Fact]
+    public async Task StartResetAsync_TenantGoneBeforeTheJobRuns_FailsWithoutResetting()
+    {
+        var engine = new Mock<IConnectorCursorResetService>();
+        engine.Setup(e => e.GetTenantConnectorsAsync(_tenantId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Connectors(_tenantId));
+
+        var (service, provider) = BuildService(engine.Object);
+        using (var db = provider.GetRequiredService<IDbContextFactory<NocturneDbContext>>().CreateDbContext())
+        {
+            db.Tenants.RemoveRange(db.Tenants);
+            db.SaveChanges();
+        }
+
+        var info = await service.StartResetAsync(_tenantId, null, null, CancellationToken.None);
+        var status = await WaitForTerminalAsync(service, info!.JobId);
+
+        status.State.Should().Be(ConnectorResetJobState.Failed);
+        status.ErrorMessage.Should().Be("Tenant no longer exists.");
+        engine.Verify(e => e.ResetTenantCursorsAsync(
+                It.IsAny<Guid>(), It.IsAny<DateTime?>(), It.IsAny<List<SyncDataType>?>(),
+                It.IsAny<IConnectorResetProgress?>(), It.IsAny<CancellationToken>()),
+            Times.Never);
     }
 
     /// <summary>
@@ -186,6 +228,8 @@ public class ConnectorCursorResetJobServiceTests
 
         public string? AmbientEndpoint { get; private set; }
 
+        public Guid? ScopeTenant { get; private set; }
+
         public Task<TenantConnectorsDto?> GetTenantConnectorsAsync(Guid tenantId, CancellationToken ct)
             => Task.FromResult<TenantConnectorsDto?>(connectors);
 
@@ -199,6 +243,7 @@ public class ConnectorCursorResetJobServiceTests
             AmbientIsSystemMutation = scopeServices
                 .GetRequiredService<IAuditContext>().IsSystemMutation();
             AmbientEndpoint = scopeServices.GetRequiredService<IAuditContext>().Endpoint;
+            ScopeTenant = scopeServices.GetRequiredService<ITenantAccessor>().TenantId;
 
             return Task.FromResult<TenantCursorResetResult?>(
                 new TenantCursorResetResult(tenantId, connectors.TenantSlug, []));

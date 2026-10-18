@@ -1,10 +1,13 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.EntityFrameworkCore;
 using Nocturne.API.Multitenancy;
 using Nocturne.Connectors.Core.Models;
+using Nocturne.Core.Contracts.Multitenancy;
 using Nocturne.Infrastructure.Data;
 using Nocturne.Infrastructure.Data.Entities;
+using Nocturne.Infrastructure.Data.Services;
 
 namespace Nocturne.API.Services.Connectors;
 
@@ -251,14 +254,18 @@ internal sealed class ConnectorResetJob : IConnectorResetProgress
 
         try
         {
-            // The engine sets the target tenant on the scope itself, once it has loaded the tenant.
-            // System-attributed because a reset is an operator-triggered re-ingest that outlives the
-            // request that started it.
-            await using var scope = TenantJobScope.Open(_serviceProvider, tenant: null, AuditEndpoint);
+            var tenant = await LoadTenantAsync(ct);
+            TenantCursorResetResult? result = null;
 
-            var engine = scope.ServiceProvider.GetRequiredService<IConnectorCursorResetService>();
+            if (tenant is not null)
+            {
+                // System-attributed because a reset is an operator-triggered re-ingest that outlives
+                // the request that started it.
+                await using var scope = TenantJobScope.Open(_serviceProvider, tenant, AuditEndpoint);
 
-            var result = await engine.ResetTenantCursorsAsync(_tenantId, _from, _dataTypes, this, ct);
+                var engine = scope.ServiceProvider.GetRequiredService<IConnectorCursorResetService>();
+                result = await engine.ResetTenantCursorsAsync(_tenantId, _from, _dataTypes, this, ct);
+            }
 
             if (result is null)
             {
@@ -290,6 +297,18 @@ internal sealed class ConnectorResetJob : IConnectorResetProgress
             _completedAt = DateTime.UtcNow;
             await PersistSnapshotAsync(CancellationToken.None);
         }
+    }
+
+    /// <summary>The target tenant, or null when it no longer exists.</summary>
+    private async Task<TenantContext?> LoadTenantAsync(CancellationToken ct)
+    {
+        await using var db = await _serviceProvider.GetRequiredService<INocturneDbContextFactory>()
+            .CreatePlatformAsync(ct);
+
+        return await db.Tenants.AsNoTracking()
+            .Where(t => t.Id == _tenantId)
+            .Select(t => new TenantContext(t.Id, t.Slug, t.DisplayName, t.IsActive, t.IsDemo))
+            .FirstOrDefaultAsync(ct);
     }
 
     /// <summary>
