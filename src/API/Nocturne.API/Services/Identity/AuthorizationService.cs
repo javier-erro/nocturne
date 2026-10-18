@@ -18,6 +18,7 @@ using AuthSubject = Nocturne.Core.Models.Authorization.Subject;
 using OAuthGrantTypes = Nocturne.Core.Models.Authorization.OAuthGrantTypes;
 using Scope = Nocturne.Core.Models.Authorization.Scope;
 using ScopeTranslator = Nocturne.Core.Models.Authorization.ScopeTranslator;
+using Nocturne.Infrastructure.Data.Services;
 
 namespace Nocturne.API.Services.Identity;
 
@@ -36,7 +37,7 @@ public class AuthorizationService : IAuthorizationService, IDisposable
     private readonly IRoleService _roleService;
     private readonly IDirectGrantService _directGrantService;
     private readonly IJwtService _jwtService;
-    private readonly NocturneDbContext _dbContext;
+    private readonly INocturneDbContextFactory _contexts;
     private readonly ICategoryReadContext _categoryReadContext;
     private readonly PermissionTrie _permissionTrie;
     private readonly Dictionary<string, Permission> _seenPermissions = new();
@@ -59,7 +60,7 @@ public class AuthorizationService : IAuthorizationService, IDisposable
         IRoleService roleService,
         IDirectGrantService directGrantService,
         IJwtService jwtService,
-        NocturneDbContext dbContext,
+        INocturneDbContextFactory contexts,
         ICategoryReadContext categoryReadContext
     )
     {
@@ -69,7 +70,7 @@ public class AuthorizationService : IAuthorizationService, IDisposable
         _roleService = roleService;
         _directGrantService = directGrantService;
         _jwtService = jwtService;
-        _dbContext = dbContext;
+        _contexts = contexts ?? throw new ArgumentNullException(nameof(contexts));
         _categoryReadContext = categoryReadContext;
         _permissionTrie = new PermissionTrie();
 
@@ -88,10 +89,11 @@ public class AuthorizationService : IAuthorizationService, IDisposable
     /// <returns>Authorization response with JWT token</returns>
     public async Task<AuthorizationResponse?> GenerateJwtFromAccessTokenAsync(string accessToken)
     {
+        await using var db = await _contexts.CreateAsync();
         try
         {
             _logger.LogDebug("Generating JWT for access token");
-            return await GenerateJwtFromDirectGrantAsync(accessToken);
+            return await GenerateJwtFromDirectGrantAsync(db, accessToken);
         }
         catch (Exception ex)
         {
@@ -105,14 +107,14 @@ public class AuthorizationService : IAuthorizationService, IDisposable
     /// so the minted JWT carries the grant's scopes, tenant pin and 24-hour limit rather than the
     /// subject's roles/permissions, and downstream requests authenticate through
     /// <see cref="Middleware.Handlers.OAuthAccessTokenHandler"/>.
-    /// The grants query relies on the scoped context's global query filter, which reads the
-    /// request's resolved tenant, matching how subject lookups are tenant-scoped on this endpoint.
+    /// The grants query relies on the global query filter of a context reading as the request,
+    /// which carries the request's resolved tenant, matching how subject lookups are tenant-scoped on this endpoint.
     /// </summary>
-    private async Task<AuthorizationResponse?> GenerateJwtFromDirectGrantAsync(string accessToken)
+    private async Task<AuthorizationResponse?> GenerateJwtFromDirectGrantAsync(NocturneDbContext db, string accessToken)
     {
         var tokenHash = HashUtils.Sha256Hex(accessToken);
 
-        var live = _dbContext.OAuthGrants
+        var live = db.OAuthGrants
             .AsNoTracking()
             .Where(DirectGrantTokenHandler.IsLiveDirectGrant(DateTime.UtcNow));
 
@@ -160,11 +162,11 @@ public class AuthorizationService : IAuthorizationService, IDisposable
         );
 
         // Stamp last-used so grants exchanged for JWTs don't show as never used.
-        // Awaited (not fire-and-forget like the auth handlers) because the scoped
-        // context is disposed at request end; failure must not block the exchange.
+        // Awaited (not fire-and-forget like the auth handlers) because the context is
+        // disposed when this method returns; failure must not block the exchange.
         try
         {
-            await _dbContext.OAuthGrants
+            await db.OAuthGrants
                 .Where(g => g.Id == grant.Id)
                 .ExecuteUpdateAsync(s => s.SetProperty(g => g.LastUsedAt, DateTime.UtcNow));
         }
@@ -378,17 +380,18 @@ public class AuthorizationService : IAuthorizationService, IDisposable
     /// <returns>List of all subjects</returns>
     public async Task<List<Subject>> GetAllSubjectsAsync()
     {
+        await using var db = await _contexts.CreateAsync();
         try
         {
             _logger.LogDebug("Getting all subjects");
 
             // A tenant that has never issued a token holds none, and asking must not create one.
-            if (await _dbContext.FindDeviceSubjectOf(_dbContext.TenantId) is not { } deviceSubjectId)
+            if (await db.FindDeviceSubjectOf(db.TenantId) is not { } deviceSubjectId)
             {
                 return [];
             }
 
-            var grants = await DeviceGrants(deviceSubjectId)
+            var grants = await DeviceGrants(db, deviceSubjectId)
                 .OrderByDescending(g => g.CreatedAt)
                 .ToListAsync();
             return grants.Select(MapGrantToLegacySubject).ToList();
@@ -407,6 +410,7 @@ public class AuthorizationService : IAuthorizationService, IDisposable
     /// <returns>Subject or null if not found</returns>
     public async Task<Subject?> GetSubjectByIdAsync(string id)
     {
+        await using var db = await _contexts.CreateAsync();
         try
         {
             _logger.LogDebug("Getting subject by ID: {Id}", id);
@@ -417,12 +421,12 @@ public class AuthorizationService : IAuthorizationService, IDisposable
                 return null;
             }
 
-            if (await _dbContext.FindDeviceSubjectOf(_dbContext.TenantId) is not { } deviceSubjectId)
+            if (await db.FindDeviceSubjectOf(db.TenantId) is not { } deviceSubjectId)
             {
                 return null;
             }
 
-            var grant = await DeviceGrants(deviceSubjectId).FirstOrDefaultAsync(g => g.Id == guid);
+            var grant = await DeviceGrants(db, deviceSubjectId).FirstOrDefaultAsync(g => g.Id == guid);
             return grant == null ? null : MapGrantToLegacySubject(grant);
         }
         catch (Exception ex)
@@ -439,12 +443,13 @@ public class AuthorizationService : IAuthorizationService, IDisposable
     /// <returns>Created subject, carrying the plaintext token this one time</returns>
     public async Task<Subject> CreateSubjectAsync(Subject subject)
     {
+        await using var db = await _contexts.CreateAsync();
         try
         {
             var label = subject.Name ?? "Unknown";
             _logger.LogDebug("Creating new subject: {Name}", label);
 
-            var deviceSubjectId = await _dbContext.DeviceSubjectOf(_dbContext.TenantId);
+            var deviceSubjectId = await db.DeviceSubjectOf(db.TenantId);
             var scopes = await ResolveScopesAsync(subject.Roles);
 
             // Nightscout will create a subject that holds nothing; a grant needs at least one
@@ -458,7 +463,7 @@ public class AuthorizationService : IAuthorizationService, IDisposable
             }
 
             var result = await _directGrantService.CreateAsync(
-                _dbContext,
+                db,
                 deviceSubjectId,
                 label,
                 [.. scopes],
@@ -502,6 +507,7 @@ public class AuthorizationService : IAuthorizationService, IDisposable
     /// <returns>Updated subject or null if not found</returns>
     public async Task<Subject?> UpdateSubjectAsync(Subject subject)
     {
+        await using var db = await _contexts.CreateAsync();
         try
         {
             _logger.LogDebug("Updating subject: {Id}", subject.Id);
@@ -512,12 +518,12 @@ public class AuthorizationService : IAuthorizationService, IDisposable
                 return null;
             }
 
-            if (await _dbContext.FindDeviceSubjectOf(_dbContext.TenantId) is not { } deviceSubjectId)
+            if (await db.FindDeviceSubjectOf(db.TenantId) is not { } deviceSubjectId)
             {
                 return null;
             }
 
-            var grant = await _dbContext.OAuthGrants
+            var grant = await db.OAuthGrants
                 .Where(g => g.SubjectId == deviceSubjectId)
                 .Where(DirectGrantTokenHandler.IsLiveDirectGrant(DateTime.UtcNow))
                 .FirstOrDefaultAsync(g => g.Id == guid);
@@ -551,7 +557,7 @@ public class AuthorizationService : IAuthorizationService, IDisposable
                 grant.Scopes = Scope.NormalizeForStorage(scopes);
             }
 
-            await _dbContext.SaveChangesAsync();
+            await db.SaveChangesAsync();
 
             return MapGrantToLegacySubject(grant);
         }
@@ -569,6 +575,7 @@ public class AuthorizationService : IAuthorizationService, IDisposable
     /// <returns>True if deleted, false if not found</returns>
     public async Task<bool> DeleteSubjectAsync(string id)
     {
+        await using var db = await _contexts.CreateAsync();
         try
         {
             _logger.LogDebug("Deleting subject: {Id}", id);
@@ -581,9 +588,9 @@ public class AuthorizationService : IAuthorizationService, IDisposable
 
             // Revoked rather than deleted: the row is the audit trail for everything the token did.
             // Scoped to the device subject for the reason given on DeviceGrants.
-            return await _dbContext.FindDeviceSubjectOf(_dbContext.TenantId) is { } deviceSubjectId
+            return await db.FindDeviceSubjectOf(db.TenantId) is { } deviceSubjectId
                 && await _directGrantService.RevokeAsync(
-                    _dbContext, guid, deviceSubjectId, ipAddress: null, userAgent: null);
+                    db, guid, deviceSubjectId, ipAddress: null, userAgent: null);
         }
         catch (Exception ex)
         {
@@ -598,8 +605,8 @@ public class AuthorizationService : IAuthorizationService, IDisposable
     /// <c>DirectGrantController</c>, so listing them here would put every member's credentials on
     /// an admin screen and let <see cref="DeleteSubjectAsync"/> revoke them.
     /// </summary>
-    private IQueryable<OAuthGrantEntity> DeviceGrants(Guid deviceSubjectId) =>
-        _dbContext.OAuthGrants
+    private IQueryable<OAuthGrantEntity> DeviceGrants(NocturneDbContext db, Guid deviceSubjectId) =>
+        db.OAuthGrants
             .AsNoTracking()
             .Where(g => g.SubjectId == deviceSubjectId)
             .Where(DirectGrantTokenHandler.IsLiveDirectGrant(DateTime.UtcNow));

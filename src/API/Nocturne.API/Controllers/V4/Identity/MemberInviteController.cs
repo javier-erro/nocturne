@@ -12,6 +12,7 @@ using Nocturne.API.Services.Auth;
 using Nocturne.Infrastructure.Data;
 using Nocturne.Infrastructure.Data.Entities;
 using Nocturne.Infrastructure.Data.Extensions;
+using Nocturne.Infrastructure.Data.Services;
 
 namespace Nocturne.API.Controllers.V4.Identity;
 
@@ -34,7 +35,7 @@ public class MemberInviteController : ControllerBase
     private readonly ITenantRoleService _tenantRoleService;
     private readonly ITenantMemberService _tenantMemberService;
     private readonly ITenantAccessor _tenantAccessor;
-    private readonly NocturneDbContext _dbContext;
+    private readonly INocturneDbContextFactory _contexts;
 
     /// <summary>
     /// Initializes a new instance of <see cref="MemberInviteController"/>.
@@ -44,21 +45,20 @@ public class MemberInviteController : ControllerBase
     /// <param name="tenantRoleService">Service for member role assignment.</param>
     /// <param name="tenantMemberService">Service for membership lookups.</param>
     /// <param name="tenantAccessor">Accessor for the current request tenant context.</param>
-    /// <param name="dbContext">Database context for direct entity access.</param>
     public MemberInviteController(
         IMemberInviteService memberInviteService,
         ITenantService tenantService,
         ITenantRoleService tenantRoleService,
         ITenantMemberService tenantMemberService,
         ITenantAccessor tenantAccessor,
-        NocturneDbContext dbContext)
+        INocturneDbContextFactory contexts)
     {
         _memberInviteService = memberInviteService;
         _tenantService = tenantService;
         _tenantRoleService = tenantRoleService;
         _tenantMemberService = tenantMemberService;
         _tenantAccessor = tenantAccessor;
-        _dbContext = dbContext;
+        _contexts = contexts ?? throw new ArgumentNullException(nameof(contexts));
     }
 
     /// <inheritdoc cref="IMemberInviteService.CreateInviteAsync"/>
@@ -307,11 +307,12 @@ public class MemberInviteController : ControllerBase
         [FromServices] PublicAccessCacheService publicAccessCache,
         CancellationToken ct)
     {
+        await using var db = await _contexts.CreateAsync(ct);
         if (!HttpContext.HasScope(Scope.MembersManage))
             return Forbid();
 
         var tenantId = _tenantAccessor.TenantId;
-        var member = await _dbContext.TenantMembers
+        var member = await db.TenantMembers
             .Include(m => m.MemberRoles)
             .Include(m => m.Subject)
             .Where(m => m.Id == id && m.TenantId == tenantId)
@@ -342,13 +343,13 @@ public class MemberInviteController : ControllerBase
             return Problem(detail: HttpContextExtensions.HistoryCeilingDetail, statusCode: 403);
 
         // Remove existing role assignments
-        _dbContext.TenantMemberRoles.RemoveRange(member.MemberRoles);
+        db.TenantMemberRoles.RemoveRange(member.MemberRoles);
 
         // Add new role assignments
         var now = DateTime.UtcNow;
         foreach (var roleId in request.RoleIds)
         {
-            _dbContext.TenantMemberRoles.Add(new TenantMemberRoleEntity
+            db.TenantMemberRoles.Add(new TenantMemberRoleEntity
             {
                 Id = Guid.CreateVersion7(),
                 TenantMemberId = member.Id,
@@ -357,7 +358,7 @@ public class MemberInviteController : ControllerBase
         }
 
         member.SysUpdatedAt = now;
-        await _dbContext.SaveChangesAsync(ct);
+        await db.SaveChangesAsync(ct);
 
         if (member.Subject?.IsSystemSubject == true && member.Subject.Name == "Public")
             publicAccessCache.Evict(tenantId);
@@ -380,11 +381,12 @@ public class MemberInviteController : ControllerBase
         [FromServices] PublicAccessCacheService publicAccessCache,
         CancellationToken ct)
     {
+        await using var db = await _contexts.CreateAsync(ct);
         if (!HttpContext.HasScope(Scope.MembersManage))
             return Forbid();
 
         var tenantId = _tenantAccessor.TenantId;
-        var member = await _dbContext.TenantMembers
+        var member = await db.TenantMembers
             .Include(m => m.MemberRoles)
             .Include(m => m.Subject)
             .Where(m => m.Id == id && m.TenantId == tenantId)
@@ -437,7 +439,7 @@ public class MemberInviteController : ControllerBase
 
         member.DirectPermissions = request.DirectPermissions;
         member.SysUpdatedAt = DateTime.UtcNow;
-        await _dbContext.SaveChangesAsync(ct);
+        await db.SaveChangesAsync(ct);
 
         if (member.Subject?.IsSystemSubject == true && member.Subject.Name == "Public")
             publicAccessCache.Evict(tenantId);
@@ -455,11 +457,12 @@ public class MemberInviteController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> GetEffectivePermissions(Guid id, CancellationToken ct)
     {
+        await using var db = await _contexts.CreateAsync(ct);
         if (!HttpContext.HasScope(Scope.SharingManage))
             return Forbid();
 
         var tenantId = _tenantAccessor.TenantId;
-        var member = await _dbContext.TenantMembers
+        var member = await db.TenantMembers
             .Where(m => m.Id == id && m.TenantId == tenantId)
             .FirstOrDefaultAsync(ct);
 
@@ -484,11 +487,12 @@ public class MemberInviteController : ControllerBase
         [FromServices] PublicAccessCacheService publicAccessCache,
         CancellationToken ct)
     {
+        await using var db = await _contexts.CreateAsync(ct);
         if (!HttpContext.HasScope(Scope.MembersManage))
             return Forbid();
 
         var tenantId = _tenantAccessor.TenantId;
-        var member = await _dbContext.TenantMembers
+        var member = await db.TenantMembers
             .Include(m => m.Subject)
             .Where(m => m.Id == id && m.TenantId == tenantId)
             .FirstOrDefaultAsync(ct);
@@ -514,7 +518,7 @@ public class MemberInviteController : ControllerBase
 
         member.LimitTo24Hours = request.LimitTo24Hours;
         member.SysUpdatedAt = DateTime.UtcNow;
-        await _dbContext.SaveChangesAsync(ct);
+        await db.SaveChangesAsync(ct);
 
         if (member.Subject?.IsSystemSubject == true && member.Subject.Name == "Public")
             publicAccessCache.Evict(tenantId);

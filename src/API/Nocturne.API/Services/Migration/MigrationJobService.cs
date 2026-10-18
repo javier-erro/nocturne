@@ -15,6 +15,7 @@ using DecompositionResult = Nocturne.Core.Models.V4.DecompositionResult;
 using Nocturne.Core.Contracts.Multitenancy;
 using Nocturne.Core.Contracts.V4;
 using Nocturne.Infrastructure.Data;
+using Nocturne.Infrastructure.Data.Services;
 using Nocturne.Infrastructure.Data.Entities;
 using Nocturne.Infrastructure.Data.Extensions;
 
@@ -233,7 +234,7 @@ public class MigrationJobService : IMigrationJobService
     public async Task<IReadOnlyList<MigrationJobInfo>> GetHistoryAsync(Guid tenantId)
     {
         using var scope = _serviceProvider.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<NocturneDbContext>();
+        await using var db = await scope.ServiceProvider.GetRequiredService<INocturneDbContextFactory>().CreateAsync();
 
         var runs = await db.MigrationRuns.AsNoTracking()
             .Where(r => r.TenantId == tenantId)
@@ -246,7 +247,7 @@ public class MigrationJobService : IMigrationJobService
     private async Task<MigrationRunEntity?> FindRunAsync(Guid tenantId, Guid jobId)
     {
         using var scope = _serviceProvider.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<NocturneDbContext>();
+        await using var db = await scope.ServiceProvider.GetRequiredService<INocturneDbContextFactory>().CreateAsync();
         return await db.MigrationRuns.AsNoTracking()
             .FirstOrDefaultAsync(r => r.Id == jobId && r.TenantId == tenantId);
     }
@@ -431,7 +432,7 @@ public class MigrationJobService : IMigrationJobService
     )
     {
         using var scope = _serviceProvider.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<NocturneDbContext>();
+        await using var dbContext = await scope.ServiceProvider.GetRequiredService<INocturneDbContextFactory>().CreateAsync(ct);
 
         var sources = (await dbContext
             .MigrationSources
@@ -610,7 +611,7 @@ internal class MigrationJob
         try
         {
             using var scope = _serviceProvider.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<NocturneDbContext>();
+            await using var db = await scope.ServiceProvider.GetRequiredService<INocturneDbContextFactory>().CreateAsync(ct);
 
             var sourceId = await UpsertSourceAsync(db, ct);
 
@@ -827,7 +828,7 @@ internal class MigrationJob
             httpClient.DefaultRequestHeaders.Add("api-secret", HashApiSecret(_request.NightscoutApiSecret));
         }
 
-        var dbContext = scope.ServiceProvider.GetRequiredService<NocturneDbContext>();
+        await using var dbContext = await scope.ServiceProvider.GetRequiredService<INocturneDbContextFactory>().CreateAsync(ct);
 
         // Build the list of collections to migrate
         var allCollections = new (string name, Func<HttpClient, CancellationToken, Task> migrate)[]
@@ -1559,7 +1560,7 @@ internal class MigrationJob
         var database = client.GetDatabase(_request.MongoDatabaseName);
 
         using var scope = CreateTenantScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<NocturneDbContext>();
+        await using var dbContext = await scope.ServiceProvider.GetRequiredService<INocturneDbContextFactory>().CreateAsync(ct);
 
         // List available collections
         var collections = await database.ListCollectionNamesAsync(cancellationToken: ct);

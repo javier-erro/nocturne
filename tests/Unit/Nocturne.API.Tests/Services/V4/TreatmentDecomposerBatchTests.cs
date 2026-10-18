@@ -95,7 +95,7 @@ public class TreatmentDecomposerBatchTests : IDisposable
             .ReturnsAsync((Guid?)null);
 
         _decomposer = new TreatmentDecomposer(
-            _context,
+            _context.AsFactory(),
             _bolusRepoMock.Object,
             _tempBasalRepoMock.Object,
             _carbRepoMock.Object,

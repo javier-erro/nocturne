@@ -69,7 +69,7 @@ public class TreatmentDecomposerDeleteTests : IDisposable
     private NocturneDbContext NewContext() => _db.CreateContext(TenantId);
 
     private TreatmentDecomposer CreateDecomposer(NocturneDbContext context, IAuditContext auditContext) => new(
-        context,
+        context.AsFactory(),
         Mock.Of<IBolusRepository>(),
         Mock.Of<ITempBasalRepository>(),
         Mock.Of<ICarbIntakeRepository>(),
