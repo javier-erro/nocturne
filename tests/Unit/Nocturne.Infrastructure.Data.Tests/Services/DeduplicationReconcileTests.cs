@@ -49,6 +49,18 @@ public class DeduplicationReconcileTests : IDisposable
             NullLogger<DeduplicationService>.Instance);
     }
 
+    private async Task<ReconcileCursor?> CursorAsync()
+    {
+        await using var db = await _context.AsFactory().CreateAsync();
+        return await DeduplicationService.GetCursorAsync(db, CancellationToken.None);
+    }
+
+    private async Task SetCursorAsync(ReconcileCursor cursor)
+    {
+        await using var db = await _context.AsFactory().CreateAsync();
+        await DeduplicationService.SetCursorAsync(db, cursor, CancellationToken.None);
+    }
+
     public void Dispose()
     {
         _context.Dispose();
@@ -884,7 +896,7 @@ public class DeduplicationReconcileTests : IDisposable
     {
         var now = DateTime.UtcNow;
         var cursor = new ReconcileCursor(now.AddHours(-1), Guid.CreateVersion7());
-        await _service.SetCursorAsync(cursor, CancellationToken.None);
+        await SetCursorAsync(cursor);
 
         var t = now.AddMinutes(-5);
         var mylife = await AddCarb(t, "mylife-connector", 50);
@@ -908,7 +920,7 @@ public class DeduplicationReconcileTests : IDisposable
             FailingReadsInterceptor.FailWhen = null;
         }
 
-        (await _service.GetCursorAsync(CancellationToken.None))!.Value.Id.Should().Be(cursor.Id);
+        (await CursorAsync())!.Value.Id.Should().Be(cursor.Id);
         logger.Verify(l => l.Log(
                 LogLevel.Error,
                 It.IsAny<EventId>(),
@@ -925,7 +937,7 @@ public class DeduplicationReconcileTests : IDisposable
     public async Task ReconcileNewLinksAsync_MergesGroupsWithRecentLinks()
     {
         var now = DateTime.UtcNow;
-        await _service.SetCursorAsync(new ReconcileCursor(now.AddHours(-1), Guid.Empty), CancellationToken.None);
+        await SetCursorAsync(new ReconcileCursor(now.AddHours(-1), Guid.Empty));
 
         var t = now.AddMinutes(-5);
         var mylife = await AddCarb(t, "mylife-connector", 50);
@@ -943,7 +955,7 @@ public class DeduplicationReconcileTests : IDisposable
         var links = await _context.LinkedRecords.AsNoTracking().IgnoreQueryFilters().Where(l => l.RecordType == "carbintake").ToListAsync();
         links.Select(l => l.CanonicalId).Distinct().Should().HaveCount(1);
 
-        var cursor = await _service.GetCursorAsync(CancellationToken.None);
+        var cursor = await CursorAsync();
         cursor.Should().NotBeNull();
         cursor!.Value.CreatedAt.Should().BeCloseTo(created, TimeSpan.FromSeconds(1));
     }
@@ -998,7 +1010,7 @@ public class DeduplicationReconcileTests : IDisposable
     public async Task ReconcileNewLinksAsync_IgnoresLinksBeforeCursor()
     {
         var now = DateTime.UtcNow;
-        await _service.SetCursorAsync(new ReconcileCursor(now, Guid.Empty), CancellationToken.None);
+        await SetCursorAsync(new ReconcileCursor(now, Guid.Empty));
 
         // Links created an hour ago — before the cursor, so already reconciled.
         var t = now.AddHours(-1);
@@ -1020,7 +1032,7 @@ public class DeduplicationReconcileTests : IDisposable
     public async Task ReconcileNewLinksAsync_SkipsUnknownRecordType()
     {
         var now = DateTime.UtcNow;
-        await _service.SetCursorAsync(new ReconcileCursor(now.AddHours(-1), Guid.Empty), CancellationToken.None);
+        await SetCursorAsync(new ReconcileCursor(now.AddHours(-1), Guid.Empty));
 
         // A valid mergeable pair that should still collapse despite a bogus row in the batch.
         var t = now.AddMinutes(-5);
@@ -1058,7 +1070,7 @@ public class DeduplicationReconcileTests : IDisposable
     [Fact]
     public async Task ReconcileNewLinksAsync_FreshTenant_NoCursor_ReconcilesFromTheStart()
     {
-        (await _service.GetCursorAsync(CancellationToken.None)).Should().BeNull();
+        (await CursorAsync()).Should().BeNull();
 
         var now = DateTime.UtcNow;
         var t = now.AddMinutes(-5);
@@ -1076,7 +1088,7 @@ public class DeduplicationReconcileTests : IDisposable
         var links = await _context.LinkedRecords.AsNoTracking().IgnoreQueryFilters().Where(l => l.RecordType == "carbintake").ToListAsync();
         links.Select(l => l.CanonicalId).Distinct().Should().HaveCount(1);
 
-        var cursor = await _service.GetCursorAsync(CancellationToken.None);
+        var cursor = await CursorAsync();
         cursor.Should().NotBeNull();
         cursor!.Value.CreatedAt.Should().BeCloseTo(created, TimeSpan.FromSeconds(1));
     }
@@ -1099,7 +1111,7 @@ public class DeduplicationReconcileTests : IDisposable
         var links = await _context.LinkedRecords.AsNoTracking().IgnoreQueryFilters().Where(l => l.RecordType == "carbintake").ToListAsync();
         links.Select(l => l.CanonicalId).Distinct().Should().HaveCount(3);
 
-        var cursor = await _service.GetCursorAsync(CancellationToken.None);
+        var cursor = await CursorAsync();
         cursor.Should().NotBeNull();
         cursor!.Value.CreatedAt.Should().BeCloseTo(created, TimeSpan.FromSeconds(1));
         cursor.Value.Id.Should().Be(links.Select(l => l.Id).Max(), "the cursor rests on the last link in (sys_created_at, id) order");
@@ -1149,7 +1161,7 @@ public class DeduplicationReconcileTests : IDisposable
 
         young.GroupsMerged.Should().Be(0);
         young.CaughtUp.Should().BeTrue();
-        (await _service.GetCursorAsync(CancellationToken.None)).Should().BeNull();
+        (await CursorAsync()).Should().BeNull();
 
         await SetAllLinkSysCreatedAt(now.AddMinutes(-3));
 
@@ -1191,12 +1203,12 @@ public class DeduplicationReconcileTests : IDisposable
     [Fact]
     public async Task Cursor_RoundTrips_DefaultsToNull()
     {
-        (await _service.GetCursorAsync(CancellationToken.None)).Should().BeNull();
+        (await CursorAsync()).Should().BeNull();
 
         var cursor = new ReconcileCursor(new DateTime(2026, 5, 30, 12, 0, 0, DateTimeKind.Utc), Guid.CreateVersion7());
-        await _service.SetCursorAsync(cursor, CancellationToken.None);
+        await SetCursorAsync(cursor);
 
-        (await _service.GetCursorAsync(CancellationToken.None)).Should().Be(cursor);
+        (await CursorAsync()).Should().Be(cursor);
     }
 
     [Fact]
@@ -1211,7 +1223,7 @@ public class DeduplicationReconcileTests : IDisposable
         });
         await _context.SaveChangesAsync();
 
-        (await _service.GetCursorAsync(CancellationToken.None)).Should().Be(new ReconcileCursor(t, Guid.Empty));
+        (await CursorAsync()).Should().Be(new ReconcileCursor(t, Guid.Empty));
     }
 
     [Fact]
@@ -1220,10 +1232,10 @@ public class DeduplicationReconcileTests : IDisposable
         var first = new ReconcileCursor(new DateTime(2026, 5, 30, 12, 0, 0, DateTimeKind.Utc), Guid.CreateVersion7());
         var second = new ReconcileCursor(new DateTime(2026, 5, 31, 9, 30, 0, DateTimeKind.Utc), Guid.CreateVersion7());
 
-        await _service.SetCursorAsync(first, CancellationToken.None);
-        await _service.SetCursorAsync(second, CancellationToken.None);
+        await SetCursorAsync(first);
+        await SetCursorAsync(second);
 
-        (await _service.GetCursorAsync(CancellationToken.None)).Should().Be(second);
+        (await CursorAsync()).Should().Be(second);
 
         // Upsert must update the single row, not create a duplicate.
         var rows = await _context.DedupReconcileState.AsNoTracking().IgnoreQueryFilters()
@@ -1678,7 +1690,7 @@ public class DeduplicationReconcileTests : IDisposable
     private async Task RestampOnePastTheCursor(Guid recordId, DateTime now)
     {
         await SetAllLinkSysCreatedAt(now.AddHours(-1));
-        await _service.SetCursorAsync(new ReconcileCursor(now.AddMinutes(-30), Guid.Empty), CancellationToken.None);
+        await SetCursorAsync(new ReconcileCursor(now.AddMinutes(-30), Guid.Empty));
 
         var restamped = await _context.LinkedRecords.SingleAsync(l => l.RecordId == recordId);
         restamped.SysCreatedAt = now.AddMinutes(-3);

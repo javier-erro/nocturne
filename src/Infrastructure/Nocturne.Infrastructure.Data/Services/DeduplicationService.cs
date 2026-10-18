@@ -766,6 +766,16 @@ public class DeduplicationService : IDeduplicationService
         CancellationToken ct)
     {
         await using var db = await _contexts.CreateAsync(ct);
+        return await MergeDuplicateGroupsAsync(db, recordType, candidateCanonicalIds, ct);
+    }
+
+    /// <inheritdoc cref="MergeDuplicateGroupsAsync(RecordType, IReadOnlySet{Guid}?, CancellationToken)"/>
+    private async Task<int> MergeDuplicateGroupsAsync(
+        NocturneDbContext db,
+        RecordType recordType,
+        IReadOnlySet<Guid>? candidateCanonicalIds,
+        CancellationToken ct)
+    {
         var recordTypeStr = RecordTypeKeys.Key(recordType);
 
         if (candidateCanonicalIds == null)
@@ -1260,7 +1270,7 @@ public class DeduplicationService : IDeduplicationService
         CancellationToken cancellationToken = default)
     {
         await using var db = await _contexts.CreateAsync(cancellationToken);
-        var cursor = await GetCursorAsync(cancellationToken);
+        var cursor = await GetCursorAsync(db, cancellationToken);
         var horizon = DateTime.UtcNow - CommitVisibilityLag;
 
         var merged = 0;
@@ -1289,7 +1299,7 @@ public class DeduplicationService : IDeduplicationService
                 try
                 {
                     // GroupsMerged is the reduction in group count (k canonicals -> 1 == k-1), matching MergeDuplicateGroupsAsync.
-                    merged += await MergeDuplicateGroupsAsync(type, candidateCanonicalIds, cancellationToken);
+                    merged += await MergeDuplicateGroupsAsync(db, type, candidateCanonicalIds, cancellationToken);
                 }
                 catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {
@@ -1302,7 +1312,7 @@ public class DeduplicationService : IDeduplicationService
 
             var last = batch[^1];
             cursor = new ReconcileCursor(last.SysCreatedAt, last.Id);
-            await SetCursorAsync(cursor.Value, cancellationToken);
+            await SetCursorAsync(db, cursor.Value, cancellationToken);
 
             // A partial batch means we've drained everything up to the horizon.
             if (batch.Count < batchSize)
@@ -2122,9 +2132,8 @@ public class DeduplicationService : IDeduplicationService
     /// first link of its instant, so the rest of that instant is reconciled again; the merge is
     /// idempotent.
     /// </summary>
-    internal async Task<ReconcileCursor?> GetCursorAsync(CancellationToken ct)
+    internal static async Task<ReconcileCursor?> GetCursorAsync(NocturneDbContext db, CancellationToken ct)
     {
-        await using var db = await _contexts.CreateAsync(ct);
         var state = await db.DedupReconcileState
             .Where(s => s.TenantId == db.TenantId)
             .FirstOrDefaultAsync(ct);
@@ -2138,9 +2147,8 @@ public class DeduplicationService : IDeduplicationService
     /// Upserts the current tenant's reconciliation cursor, inserting a row if none exists
     /// or updating the existing one otherwise.
     /// </summary>
-    internal async Task SetCursorAsync(ReconcileCursor cursor, CancellationToken ct)
+    internal static async Task SetCursorAsync(NocturneDbContext db, ReconcileCursor cursor, CancellationToken ct)
     {
-        await using var db = await _contexts.CreateAsync(ct);
         // Npgsql requires Kind=Utc to persist a timestamptz; SQLite tests won't catch a bad caller.
         var createdAt = cursor.CreatedAt.Kind switch
         {
