@@ -889,8 +889,7 @@ public class TreatmentDecomposer : DecomposerBase, ITreatmentDecomposer, IDecomp
     /// did, as <see cref="DecomposerBase.UpsertByLegacyIdAsync{TRecord}"/> files a record: a span
     /// already stored is reported updated, so a re-upload is announced as the edit it is and
     /// write-back looks for the copy upstream holds before it writes; a span the user deleted is
-    /// counted in <see cref="V4Models.DecompositionResult.SkippedDeleted"/> and refused under the
-    /// deleted row.
+    /// counted in <see cref="V4Models.DecompositionResult.SkippedDeleted"/>.
     /// </summary>
     /// <returns>False when the user deleted the span, so nothing was written.</returns>
     private async Task<bool> UpsertTreatmentSpanAsync(StateSpan span, V4Models.DecompositionResult result, CancellationToken ct)
@@ -906,8 +905,6 @@ public class TreatmentDecomposer : DecomposerBase, ITreatmentDecomposer, IDecomp
                 break;
             default:
                 result.SkippedDeleted++;
-                if (Guid.TryParse(written.Span.Id, out var heldBy))
-                    result.RefusedRecords.Add(new V4Models.RefusedRecord(typeof(StateSpan), heldBy));
                 return false;
         }
 

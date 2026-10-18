@@ -48,6 +48,6 @@ public class DecompositionResult
 }
 
 /// <summary>A record not written because the stored row <paramref name="HeldBy"/> holds its identity.</summary>
-/// <param name="RecordType">The record type that was refused: a V4 record or a <see cref="StateSpan"/>.</param>
+/// <param name="RecordType">The V4 record type that was refused.</param>
 /// <param name="HeldBy">The id of the stored row holding the identity.</param>
 public sealed record RefusedRecord(Type RecordType, Guid HeldBy);

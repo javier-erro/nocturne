@@ -255,41 +255,42 @@ public class TreatmentReadServiceTests
 
     /// <summary>
     /// A treatment stored as a span (an override here) whose span the user deleted wrote nothing: it
-    /// is answered under the id the deleted span was served by, the span's own id, and is not among
-    /// the written treatments an event announces.
+    /// is answered under the id it was sent with, the span's original id, and is not among the
+    /// written treatments an event announces.
     /// </summary>
     [Fact]
     public async Task CreateAsync_AnswersAReuploadOfADeletedSpanUnderItsIdWithoutCountingItWritten()
     {
-        var deletedSpan = Guid.NewGuid();
         var treatment = new Treatment { Id = "override-1", Mills = 1000, EventType = "Temporary Override", Duration = 30 };
-        var decomposition = new DecompositionResult { CorrelationId = Guid.NewGuid(), SkippedDeleted = 1 };
-        decomposition.RefusedRecords.Add(new RefusedRecord(typeof(StateSpan), deletedSpan));
 
-        var result = await CreateWithAsync(treatment, decomposition);
+        var result = await CreateWithAsync(treatment, new DecompositionResult { CorrelationId = Guid.NewGuid(), SkippedDeleted = 1 });
 
         result.Should().BeEmpty();
         result.Updated.Should().BeEmpty();
         result.SkippedDeleted.Should().Be(1);
-        result.Settled.Should().ContainSingle().Which.Id.Should().Be(deletedSpan.ToString());
+        result.Settled.Should().ContainSingle().Which.Id.Should().Be("override-1");
     }
 
     /// <summary>
-    /// A treatment stored as a served span (an override here) is answered under the span's id, which
-    /// reads serve it by, and carries its original id as the legacy id write-back sends.
+    /// A treatment stored as a served span (an override here) is answered under the id reads serve
+    /// the span by, its primary key, and carries its original id as the legacy id write-back sends.
     /// </summary>
     [Fact]
-    public async Task CreateAsync_NamesATreatmentStoredAsASpanByTheSpan()
+    public async Task CreateAsync_NamesATreatmentStoredAsASpanAsReadsServeIt()
     {
-        var span = new StateSpan { Id = Guid.NewGuid().ToString(), OriginalId = "override-1", Category = StateSpanCategory.Override };
+        var spanKey = Guid.NewGuid();
+        var span = new StateSpan { Id = "override-1", OriginalId = "override-1", Category = StateSpanCategory.Override };
         var treatment = new Treatment { Id = "override-1", Mills = 1000, EventType = "Temporary Override", Duration = 30 };
+        _projection
+            .Setup(p => p.GetProjectedStateSpanTreatmentAsync("override-1", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Treatment { Id = spanKey.ToString(), RecordId = spanKey, LegacyId = "override-1" });
 
         var result = await CreateWithAsync(treatment, Wrote([span]));
 
         var created = result.Should().ContainSingle().Subject;
-        created.Id.Should().Be(span.Id);
+        created.Id.Should().Be(spanKey.ToString());
         created.LegacyId.Should().Be("override-1");
-        created.RecordId.Should().Be(Guid.Parse(span.Id));
+        created.RecordId.Should().Be(spanKey);
         treatment.Id.Should().Be("override-1", "the submitted treatment is left untouched");
     }
 

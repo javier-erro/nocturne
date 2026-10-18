@@ -187,7 +187,7 @@ public class TreatmentReadService : ITreatmentStore
                 var result = await _decomposer.DecomposeAsync(treatment, WriteOrigin.Live, ct);
                 skippedDeleted += result.SkippedDeleted;
                 var updatedStored = UpdatedStoredRecord(treatment, result);
-                var served = ToCreated(treatment, result);
+                var served = await ToServedAsync(treatment, result, ct);
                 settled.Add(served);
                 if (IsRefused(result) || result.SkippedUnsupported > 0)
                     continue;
@@ -344,9 +344,9 @@ public class TreatmentReadService : ITreatmentStore
     /// That legacy id rides along as <see cref="Treatment.LegacyId"/>, the key write-back sends the
     /// treatment upstream under, and the record's uuid as <see cref="Treatment.RecordId"/>, whose
     /// prefix earlier write-backs used. A treatment the user's deletion refused (<see cref="IsRefused"/>) is
-    /// named by the deleted record, as it was served before the delete. A treatment stored as a served
-    /// span is named by the span. A treatment that wrote none of the projected tables keeps the id it
-    /// was sent with.
+    /// named by the deleted record, as it was served before the delete. A treatment that wrote none
+    /// of the projected tables keeps the id it was sent with: for one stored as a span, the span's
+    /// original id, which <see cref="ToServedAsync"/> replaces with the id reads serve it under.
     /// </summary>
     internal static Treatment ToCreated(Treatment treatment, DecompositionResult result)
     {
@@ -358,8 +358,8 @@ public class TreatmentReadService : ITreatmentStore
         if (IsRefused(result))
         {
             var refused = result.RefusedRecords
-                .Where(r => RefusalTypes.Contains(r.RecordType))
-                .MinBy(r => Array.IndexOf(RefusalTypes, r.RecordType));
+                .Where(r => ServedRecordTypes.Contains(r.RecordType))
+                .MinBy(r => Array.IndexOf(ServedRecordTypes, r.RecordType));
             if (refused is not null)
                 created.Id = refused.RecordType == typeof(Core.Models.V4.TempBasal) && MongoObjectId.IsObjectId(treatment.Id)
                     ? treatment.Id
@@ -368,12 +368,9 @@ public class TreatmentReadService : ITreatmentStore
             return created;
         }
 
-        if (result.CreatedRecords.Concat(result.UpdatedRecords).OfType<StateSpan>().FirstOrDefault(IsServedStateSpan)
-            is { OriginalId: { } spanKey } span && Guid.TryParse(span.Id, out var spanRecordId))
+        if (ServedSpanKey(result) is { } spanKey)
         {
             created.LegacyId = spanKey;
-            created.RecordId = spanRecordId;
-            created.Id = spanRecordId.ToString();
             return created;
         }
 
@@ -398,10 +395,32 @@ public class TreatmentReadService : ITreatmentStore
         result.CreatedRecords.Count == 0 && result.UpdatedRecords.Count == 0 && result.SkippedDeleted > 0;
 
     /// <summary>
-    /// Whether a state span the decomposer wrote is read back as the treatment, under the span's id.
+    /// The original id of the state span the decomposer wrote that is read back as the treatment,
+    /// under the span's own id, or <c>null</c> when it wrote none.
     /// </summary>
-    private static bool IsServedStateSpan(StateSpan span) =>
-        span is { OriginalId: not null, Category: StateSpanCategory.Override or StateSpanCategory.TemporaryTarget or StateSpanCategory.Profile };
+    private static string? ServedSpanKey(DecompositionResult result) =>
+        result.CreatedRecords.Concat(result.UpdatedRecords).OfType<StateSpan>()
+            .FirstOrDefault(span => span is { OriginalId: not null, Category: StateSpanCategory.Override or StateSpanCategory.TemporaryTarget or StateSpanCategory.Profile })
+            ?.OriginalId;
+
+    /// <summary>
+    /// <see cref="ToCreated"/>, with a treatment stored as a served span named by the span's primary
+    /// key, which the written span does not carry (its domain id is its original id), so it is read
+    /// back as reads serve it.
+    /// </summary>
+    private async Task<Treatment> ToServedAsync(Treatment treatment, DecompositionResult result, CancellationToken ct)
+    {
+        var created = ToCreated(treatment, result);
+        if (!IsRefused(result)
+            && ServedSpanKey(result) is { } spanKey
+            && await _projection.GetProjectedStateSpanTreatmentAsync(spanKey, ct) is { Id: { } spanId } span)
+        {
+            created.Id = spanId;
+            created.RecordId = span.RecordId;
+        }
+
+        return created;
+    }
 
     /// <summary>
     /// The record a decomposed treatment is read back under: a temp basal (served as the temp basal
@@ -413,12 +432,6 @@ public class TreatmentReadService : ITreatmentStore
         typeof(Core.Models.V4.TempBasal), typeof(Bolus), typeof(CarbIntake), typeof(BGCheck), typeof(DeviceEvent),
         typeof(BolusCalculation), typeof(Note),
     ];
-
-    /// <summary>
-    /// The refused record a fully refused treatment is answered under: a served record first, then
-    /// the span a treatment stored as one (<see cref="IsServedStateSpan"/>) was served as.
-    /// </summary>
-    private static readonly Type[] RefusalTypes = [.. ServedRecordTypes, typeof(StateSpan)];
 
     /// <summary>
     /// The stored record a client-sent treatment id names, or none and the id to look a state span up
