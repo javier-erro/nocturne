@@ -118,8 +118,8 @@ public class V4GoldenFixture : IAsyncLifetime
     public async Task<T> QueryAsync<T>(Guid tenantId, Func<NocturneDbContext, Task<T>> query)
     {
         PinTenant(tenantId);
-        var factory = _provider!.GetRequiredService<INocturneDbContextFactory>();
-        await using var ctx = await factory.CreateAsync();
+        await using var scope = _provider!.CreateAsyncScope();
+        await using var ctx = await scope.ServiceProvider.GetRequiredService<INocturneDbContextFactory>().CreateAsync();
         return await query(ctx);
     }
 
@@ -128,7 +128,7 @@ public class V4GoldenFixture : IAsyncLifetime
 
     private async Task SeedTenantAsync(Guid tenantId)
     {
-        // Seed via a bare EF context on the migrator connection (no interceptors, no tenant carrier):
+        // Seed via a bare EF context on the migrator connection (no interceptors, no tenant):
         // TenantEntity is ISystemTimestamped, not ITenantScoped, so it is exempt from RLS.
         var options = new DbContextOptionsBuilder<NocturneDbContext>()
             .UseNpgsql(MigratorConnectionString)
