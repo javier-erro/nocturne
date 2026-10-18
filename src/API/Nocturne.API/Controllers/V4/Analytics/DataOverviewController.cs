@@ -53,7 +53,7 @@ public class DataOverviewController : ControllerBase
     /// <returns>A <see cref="DataOverviewYearsResponse"/> with available years and data source names.</returns>
     [HttpGet("years")]
     [RemoteQuery]
-    [ResponseCache(Duration = 300)]
+    [ResponseCache(Duration = 300, Location = ResponseCacheLocation.Client)]
     [ProducesResponseType(typeof(DataOverviewYearsResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status500InternalServerError)]
     [ErrorEnvelope]
@@ -65,6 +65,31 @@ public class DataOverviewController : ControllerBase
         return Ok(result);
     }
 
+    [HttpGet("summary")]
+    [RemoteQuery]
+    [ResponseCache(Duration = 180, Location = ResponseCacheLocation.Client)]
+    [ProducesResponseType(typeof(YearSummaryResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+    [ErrorEnvelope]
+    public async Task<ActionResult<YearSummaryResponse>> GetYearSummary(
+        [FromQuery] int year,
+        [FromQuery] string[]? dataSources = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (year < 1970 || year > 2100)
+            return BadRequest();
+
+        var cleanSources = dataSources?.Where(s => !string.IsNullOrWhiteSpace(s)).ToArray();
+        if (cleanSources is { Length: 0 })
+            cleanSources = null;
+
+        var result = await _dataOverviewService.GetYearSummaryAsync(year, cleanSources, cancellationToken);
+        if (result.DailySummary is null || result.GriTimeline is null)
+            Response.Headers.CacheControl = "no-store";
+        return Ok(result);
+    }
+
     /// <summary>
     /// Get day-level aggregated counts and average glucose for a given year
     /// </summary>
@@ -73,7 +98,7 @@ public class DataOverviewController : ControllerBase
     /// <param name="cancellationToken">Cancellation token</param>
     [HttpGet("daily-summary")]
     [RemoteQuery]
-    [ResponseCache(Duration = 180, VaryByQueryKeys = new[] { "*" })]
+    [ResponseCache(Duration = 180, Location = ResponseCacheLocation.Client)]
     [ProducesResponseType(typeof(DailySummaryResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status500InternalServerError)]
@@ -108,7 +133,7 @@ public class DataOverviewController : ControllerBase
     /// <param name="cancellationToken">Cancellation token</param>
     [HttpGet("gri-timeline")]
     [RemoteQuery]
-    [ResponseCache(Duration = 300, VaryByQueryKeys = new[] { "*" })]
+    [ResponseCache(Duration = 300, Location = ResponseCacheLocation.Client)]
     [ProducesResponseType(typeof(GriTimelineResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status500InternalServerError)]
@@ -144,7 +169,7 @@ public class DataOverviewController : ControllerBase
     /// <param name="cancellationToken">Cancellation token</param>
     [HttpGet("ehba1c-timeline")]
     [RemoteQuery]
-    [ResponseCache(Duration = 300, VaryByQueryKeys = new[] { "*" })]
+    [ResponseCache(Duration = 300, Location = ResponseCacheLocation.Client)]
     [ProducesResponseType(typeof(EHbA1cTimelineResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status500InternalServerError)]

@@ -161,6 +161,7 @@ public class LegacyReadCountCapTests
         var controller = new TreatmentsController(
             treatmentService.Object,
             Mock.Of<IDocumentProcessingService>(),
+            TimeProvider.System,
             Mock.Of<ILogger<TreatmentsController>>()
         )
         {
@@ -171,6 +172,49 @@ public class LegacyReadCountCapTests
 
         observedCount.Should().Be(expected);
     }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task Treatments_ExplicitNonPositiveCount_ReturnsEmptyWithoutQuerying(int requested)
+    {
+        var treatmentService = new Mock<ITreatmentService>(MockBehavior.Strict);
+        var controller = CreateTreatmentsController(treatmentService.Object, new DefaultHttpContext());
+
+        var result = await controller.GetTreatments(count: requested);
+
+        result.Should().BeOfType<OkObjectResult>().Which.Value.Should().BeAssignableTo<Treatment[]>().Which.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Treatments_AbsentCount_PassesNullSoTheServiceAppliesItsDefault()
+    {
+        int? observedCount = -1;
+        var treatmentService = new Mock<ITreatmentService>();
+        treatmentService
+            .Setup(x => x.GetTreatmentsAsync(It.IsAny<string?>(), It.IsAny<int?>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()))
+            .Callback((string? _, int? count, int? _, CancellationToken _) => observedCount = count)
+            .ReturnsAsync(Array.Empty<Treatment>());
+        var controller = CreateTreatmentsController(treatmentService.Object, new DefaultHttpContext());
+
+        await controller.GetTreatments();
+
+        observedCount.Should().BeNull();
+    }
+
+    private static TreatmentsController CreateTreatmentsController(
+        ITreatmentService treatmentService,
+        HttpContext httpContext
+    ) =>
+        new(
+            treatmentService,
+            Mock.Of<IDocumentProcessingService>(),
+            TimeProvider.System,
+            Mock.Of<ILogger<TreatmentsController>>()
+        )
+        {
+            ControllerContext = new ControllerContext { HttpContext = httpContext },
+        };
 
     [Theory]
     [InlineData(AtMergedCap, AtMergedCap)]
@@ -358,7 +402,8 @@ public class LegacyReadCountCapTests
         var controller = new ActivityController(
             activityService,
             Mock.Of<IActivityDecomposer>(),
-            Mock.Of<ILogger<ActivityController>>()
+            Mock.Of<ILogger<ActivityController>>(),
+            TimeProvider.System
         )
         {
             ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() },

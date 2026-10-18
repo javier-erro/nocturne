@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { a1cLabel } from "$lib/utils/a1c-formatting";
   import { time } from "$lib/utils/formatting";
   import { getSettingsStore } from "$lib/stores/settings-store.svelte";
   import {
@@ -8,6 +9,8 @@
   } from "$lib/stores/appearance-store.svelte";
   import {
     glucoseUnits,
+    a1cName,
+    a1cUnits,
     timeFormat,
     nightModeSchedule,
     setColorScheme,
@@ -51,9 +54,11 @@
   } from "$lib/components/ui/card";
   import { Button } from "$lib/components/ui/button";
   import { Switch } from "$lib/components/ui/switch";
+  import { Slider } from "$lib/components/ui/slider";
   import { Label } from "$lib/components/ui/label";
   import { Separator } from "$lib/components/ui/separator";
   import { Badge } from "$lib/components/ui/badge";
+  import * as RadioGroup from "$lib/components/ui/radio-group";
   import {
     Select,
     SelectContent,
@@ -61,19 +66,17 @@
     SelectTrigger,
   } from "$lib/components/ui/select";
   import { Label as FormLabel } from "$lib/components/ui/label";
-  import {
-    Activity,
-    Palette,
-    Sun,
-    Moon,
-    Monitor,
-    Clock,
-    Globe,
-    Languages,
-    AlertCircle,
-    Timer,
-    Eye,
-  } from "lucide-svelte";
+  import Activity from "@lucide/svelte/icons/activity";
+  import Palette from "@lucide/svelte/icons/palette";
+  import Sun from "@lucide/svelte/icons/sun";
+  import Moon from "@lucide/svelte/icons/moon";
+  import Monitor from "@lucide/svelte/icons/monitor";
+  import Clock from "@lucide/svelte/icons/clock";
+  import Globe from "@lucide/svelte/icons/globe";
+  import Languages from "@lucide/svelte/icons/languages";
+  import AlertCircle from "@lucide/svelte/icons/circle-alert";
+  import Timer from "@lucide/svelte/icons/timer";
+  import Eye from "@lucide/svelte/icons/eye";
   import SettingsPageSkeleton from "$lib/components/settings/SettingsPageSkeleton.svelte";
   import { browser } from "$app/environment";
   import { resolve } from "$app/paths";
@@ -147,15 +150,7 @@
   let glucoseProcessingPreference: string | null = $derived(
     preferenceQuery?.current?.preferredGlucoseProcessing ?? null,
   );
-  let sourceDefaults: Array<{ match: string; field: string; processing: string }> =
-    $derived(
-      // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- zod types the rule fields as optional, but the API always returns them populated
-      (sourceDefaultsQuery?.current?.rules ?? []) as Array<{
-        match: string;
-        field: string;
-        processing: string;
-      }>,
-    );
+  let sourceDefaults = $derived(sourceDefaultsQuery?.current?.rules ?? []);
   let sourceDefaultsDialogOpen = $state(false);
 
   // Chart range and tracker pills persist server-side. They used to only mutate
@@ -206,7 +201,7 @@
   {#if store.isLoading}
     <SettingsPageSkeleton cardCount={4} />
   {:else if store.hasError}
-    <Card class="border-destructive">
+    <Card variant="destructive">
       <CardContent class="flex items-center gap-3 py-6">
         <AlertCircle class="h-5 w-5 text-destructive" />
         <p class="font-medium">{store.error}</p>
@@ -225,16 +220,17 @@
         </CardDescription>
       </CardHeader>
       <CardContent class="space-y-4">
-        <div class="grid gap-4 @xl:grid-cols-2 @5xl:grid-cols-4">
+        <RadioGroup.Root
+          class="grid @xl:grid-cols-2 @5xl:grid-cols-4"
+          aria-label="Color theme"
+          value={currentTheme}
+          onValueChange={(theme) => {
+            if (theme === "nocturne" || theme === "trio" || theme === "aaps" || theme === "classic")
+              handleThemeChange(theme);
+          }}
+        >
           <!-- Nocturne Theme -->
-          <button
-            type="button"
-            class="relative flex flex-col items-start gap-2 rounded-lg border-2 p-4 text-left transition-colors hover:bg-accent/50 {currentTheme ===
-            'nocturne'
-              ? 'border-primary bg-accent/30'
-              : 'border-border'}"
-            onclick={() => handleThemeChange("nocturne")}
-          >
+          <RadioGroup.Card value="nocturne">
             {#if currentTheme === "nocturne"}
               <Badge class="absolute right-2 top-2" variant="default">
                 Active
@@ -271,17 +267,10 @@
                 title="Carbs"
               ></div>
             </div>
-          </button>
+          </RadioGroup.Card>
 
           <!-- Trio Theme -->
-          <button
-            type="button"
-            class="relative flex flex-col items-start gap-2 rounded-lg border-2 p-4 text-left transition-colors hover:bg-accent/50 {currentTheme ===
-            'trio'
-              ? 'border-primary bg-accent/30'
-              : 'border-border'}"
-            onclick={() => handleThemeChange("trio")}
-          >
+          <RadioGroup.Card value="trio">
             {#if currentTheme === "trio"}
               <Badge class="absolute right-2 top-2" variant="default">
                 Active
@@ -318,17 +307,10 @@
                 title="Carbs"
               ></div>
             </div>
-          </button>
+          </RadioGroup.Card>
 
           <!-- AAPS Theme -->
-          <button
-            type="button"
-            class="relative flex flex-col items-start gap-2 rounded-lg border-2 p-4 text-left transition-colors hover:bg-accent/50 {currentTheme ===
-            'aaps'
-              ? 'border-primary bg-accent/30'
-              : 'border-border'}"
-            onclick={() => handleThemeChange("aaps")}
-          >
+          <RadioGroup.Card value="aaps">
             {#if currentTheme === "aaps"}
               <Badge class="absolute right-2 top-2" variant="default">
                 Active
@@ -365,17 +347,10 @@
                 title="Accent"
               ></div>
             </div>
-          </button>
+          </RadioGroup.Card>
 
           <!-- Classic Theme -->
-          <button
-            type="button"
-            class="relative flex flex-col items-start gap-2 rounded-lg border-2 p-4 text-left transition-colors hover:bg-accent/50 {currentTheme ===
-            'classic'
-              ? 'border-primary bg-accent/30'
-              : 'border-border'}"
-            onclick={() => handleThemeChange("classic")}
-          >
+          <RadioGroup.Card value="classic">
             {#if currentTheme === "classic"}
               <Badge class="absolute right-2 top-2" variant="default">
                 Active
@@ -412,8 +387,8 @@
                 title="Classic Blue"
               ></div>
             </div>
-          </button>
-        </div>
+          </RadioGroup.Card>
+        </RadioGroup.Root>
 
         <Separator />
 
@@ -602,6 +577,36 @@
             interface stays in the language above.
           </p>
         </div>
+        <div class="grid gap-4 @sm:grid-cols-2">
+          <div class="space-y-2">
+            <Label for="a1c-name">{a1cLabel()} display name</Label>
+            <!-- @wc-ignore -->
+            <Select type="single" value={a1cName.current} onValueChange={(value) => {
+              if (value === "HbA1c" || value === "A1c") a1cName.current = value;
+            }}>
+              <SelectTrigger id="a1c-name">{a1cName.current}</SelectTrigger>
+              <SelectContent>
+                <SelectItem value="HbA1c">HbA1c</SelectItem>
+                <SelectItem value="A1c">A1c</SelectItem>
+              </SelectContent>
+            </Select>
+            <p class="text-xs text-muted-foreground">Estimated values retain the e prefix: eHbA1c or eA1c.</p>
+          </div>
+          <div class="space-y-2">
+            <Label for="a1c-units">{a1cLabel()} display unit</Label>
+            <!-- @wc-ignore -->
+            <Select type="single" value={a1cUnits.current} onValueChange={(value) => {
+              if (value === "percent" || value === "mmol/mol") a1cUnits.current = value;
+            }}>
+              <SelectTrigger id="a1c-units">{a1cUnits.current === "percent" ? "% (NGSP)" : "mmol/mol (IFCC)"}</SelectTrigger>
+              <SelectContent>
+                <SelectItem value="percent">% (NGSP)</SelectItem>
+                <SelectItem value="mmol/mol">mmol/mol (IFCC)</SelectItem>
+              </SelectContent>
+            </Select>
+            <p class="text-xs text-muted-foreground">Use % (NGSP) or mmol/mol (IFCC) for measured and estimated {a1cLabel()}. Blood glucose units are set separately.</p>
+          </div>
+        </div>
       </CardContent>
     </Card>
 
@@ -619,15 +624,15 @@
       <CardContent>
         <div class="grid gap-4 @sm:grid-cols-2">
           <div class="space-y-1">
-            <Label class="text-muted-foreground text-xs">Timezone</Label>
+            <Label size="sm" variant="muted">Timezone</Label>
             <p class="font-medium">{browserTimezone}</p>
           </div>
           <div class="space-y-1">
-            <Label class="text-muted-foreground text-xs">UTC Offset</Label>
+            <Label size="sm" variant="muted">UTC Offset</Label>
             <p class="font-medium">{timezoneOffset}</p>
           </div>
           <div class="space-y-1">
-            <Label class="text-muted-foreground text-xs">Current Time</Label>
+            <Label size="sm" variant="muted">Current Time</Label>
             <p class="font-medium font-mono">{currentTime}</p>
           </div>
         </div>
@@ -706,6 +711,7 @@
                 </SelectContent>
               </Select>
               {#if chartLineColorMode.current === "single"}
+                <!-- eslint-disable-next-line no-restricted-syntax -- native colour picker -->
                 <input
                   type="color"
                   value={chartLineColor.current}
@@ -758,6 +764,7 @@
                   </SelectContent>
                 </Select>
                 {#if chartPointColorMode.current === "single"}
+                  <!-- eslint-disable-next-line no-restricted-syntax -- native colour picker -->
                   <input
                     type="color"
                     value={chartPointColor.current}
@@ -804,16 +811,15 @@
         {#if chartAreaMode.current !== "off"}
           <div class="mt-4 space-y-2">
             <FormLabel>Area opacity: {Math.round(chartAreaOpacity.current * 100)}%</FormLabel>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.05"
+            <Slider
+              type="single"
+              min={0}
+              max={1}
+              step={0.05}
               value={chartAreaOpacity.current}
-              oninput={(e) => {
-                chartAreaOpacity.current = parseFloat(e.currentTarget.value);
+              onValueChange={(v: number) => {
+                chartAreaOpacity.current = v;
               }}
-              class="w-full"
             />
           </div>
         {/if}

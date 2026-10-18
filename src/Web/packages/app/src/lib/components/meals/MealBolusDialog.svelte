@@ -16,8 +16,13 @@
     remove as removeBolus,
   } from "$api/generated/bolus.generated.remote";
   import { toast } from "svelte-sonner";
+  import { tryGetRealtimeStore } from "$lib/stores/realtime-store.svelte";
   import { useToastSubmission } from "$lib/forms";
-  import { Syringe, Plus, Pencil, Trash2, ArrowLeft } from "lucide-svelte";
+  import Syringe from "@lucide/svelte/icons/syringe";
+  import Plus from "@lucide/svelte/icons/plus";
+  import Pencil from "@lucide/svelte/icons/pencil";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
 
   interface Props {
     open: boolean;
@@ -34,15 +39,29 @@
   let deletingBolusId = $state<string | null>(null);
   const deletion = useToastSubmission("Failed to delete bolus");
 
-  let editForm = $state({
-    insulin: null as number | null,
-    bolusType: undefined as BolusType | undefined,
-    programmed: undefined as number | undefined,
-    delivered: undefined as number | undefined,
-    duration: undefined as number | undefined,
+  const realtimeStore = tryGetRealtimeStore();
+
+  interface BolusEditForm {
+    insulin: number | null;
+    bolusType: BolusType | undefined;
+    programmed: number | undefined;
+    delivered: number | undefined;
+    duration: number | undefined;
+    automatic: boolean;
+    insulinType: string;
+    patientInsulinId: string | undefined;
+    isBasalInsulin: boolean;
+  }
+
+  let editForm = $state<BolusEditForm>({
+    insulin: null,
+    bolusType: undefined,
+    programmed: undefined,
+    delivered: undefined,
+    duration: undefined,
     automatic: false,
     insulinType: "",
-    patientInsulinId: undefined as string | undefined,
+    patientInsulinId: undefined,
     isBasalInsulin: false,
   });
 
@@ -56,9 +75,7 @@
 
   // Fetch patient insulins for the form dropdown
   const insulinsResource = patientRemote.getInsulins();
-  let patientInsulins = $derived(
-    (insulinsResource.current ?? []) as PatientInsulin[],
-  );
+  let patientInsulins: PatientInsulin[] = $derived(insulinsResource.current ?? []);
 
   // Reset to list mode when dialog opens
   $effect(() => {
@@ -128,6 +145,7 @@
     if (!bolusId) return;
     await deletion.run(async () => {
       await removeBolus(bolusId);
+      realtimeStore?.noteTreatmentWrite();
       toast.success("Bolus deleted");
       onSave();
       deletingBolusId = null;
@@ -148,6 +166,7 @@
     {...activeForm.enhance(async ({ submit }) => {
       await submit();
       if (activeForm.result) {
+        realtimeStore?.noteTreatmentWrite();
         toast.success(editingBolus ? "Bolus updated" : "Bolus added");
         onSave();
         returnToList();
@@ -218,8 +237,7 @@
         <div class="flex items-center gap-2">
           <Button
             variant="ghost"
-            size="icon"
-            class="h-8 w-8"
+            size="icon-sm"
             onclick={returnToList}
           >
             <ArrowLeft class="h-4 w-4" />
@@ -278,7 +296,7 @@
                     </span>
                     <span class="text-sm">{formatInsulinDisplay(bolus.insulin)}U</span>
                     {#if bolus.bolusType}
-                      <Badge variant="secondary" class="text-xs">
+                      <Badge variant="secondary">
                         {bolus.bolusType}
                       </Badge>
                     {/if}
@@ -292,16 +310,16 @@
                 <div class="flex gap-1">
                   <Button
                     variant="ghost"
-                    size="icon"
-                    class="h-8 w-8"
+                    size="icon-sm"
+                    aria-label="Edit bolus"
                     onclick={() => startEdit(bolus)}
                   >
                     <Pencil class="h-4 w-4" />
                   </Button>
                   <Button
                     variant="ghost"
-                    size="icon"
-                    class="h-8 w-8"
+                    size="icon-sm"
+                    aria-label="Delete bolus"
                     onclick={() => (deletingBolusId = bolus.id ?? null)}
                   >
                     <Trash2 class="h-4 w-4" />

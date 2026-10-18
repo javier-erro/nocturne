@@ -1,12 +1,15 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import { Chart, Svg, Axis } from 'layerchart';
+  import { Chart, Svg, Axis, Rule } from 'layerchart';
   import { scaleTime, scaleLinear } from 'd3-scale';
   import { bisector } from 'd3';
   import type { TransformedChartData } from './types.js';
+  import type { PredictionCurves } from './predictions.js';
+  import { metadataString, tempBasalFields } from './utils/metadata.js';
   import GlucoseTrack from './tracks/GlucoseTrack.svelte';
   import BasalTrack from './tracks/BasalTrack.svelte';
   import IobCobTrack from './tracks/IobCobTrack.svelte';
+  import PredictionTrack from './tracks/PredictionTrack.svelte';
   import ChartLegend from './ChartLegend.svelte';
   import ChartTooltip from './ChartTooltip.svelte';
   import GlucoseInspectionDialog from './dialogs/GlucoseInspectionDialog.svelte';
@@ -19,9 +22,21 @@
     height?: number;
     carbRatio?: number;
     showLegend?: boolean;
-    dialog: Snippet<[{ open: boolean; onOpenChange: (v: boolean) => void; children: Snippet }]>;
-    badge: Snippet<[{ variant?: 'default' | 'outline' | 'destructive'; class?: string; children: Snippet }]>;
-    button: Snippet<[{ onclick: () => void; variant?: string; size?: string; children: Snippet }]>;
+    /** Time window to draw. Defaults to the span of the glucose data. */
+    xDomain?: [Date, Date];
+    /** oref prediction curves, drawn over the glucose track. */
+    predictions?: PredictionCurves | null;
+    /** Draws a "now" rule across every track, e.g. when replaying history. */
+    now?: Date | null;
+    /** Tracks to render alongside glucose. Both default to shown. */
+    tracks?: { basal?: boolean; iobCob?: boolean };
+    /**
+     * The three snippets below render the inspection dialogs. Leave `dialog` out to embed
+     * the chart read-only: clicking a point then opens nothing.
+     */
+    dialog?: Snippet<[{ open: boolean; onOpenChange: (v: boolean) => void; children: Snippet }]>;
+    badge?: Snippet<[{ variant?: 'default' | 'outline' | 'destructive'; class?: string; children: Snippet }]>;
+    button?: Snippet<[{ onclick: () => void; variant?: string; size?: string; children: Snippet }]>;
   }
 
   let {
@@ -30,23 +45,33 @@
     height = 400,
     carbRatio = 15,
     showLegend = true,
+    xDomain: xDomainProp,
+    predictions = null,
+    now = null,
+    tracks,
     dialog,
     badge,
     button,
   }: Props = $props();
 
+  const inspectable = $derived(dialog !== undefined && badge !== undefined && button !== undefined);
+
   // ===== TRACK HEIGHT PROPORTIONS =====
-  // Basal: 12%, IOB/COB: 18%, Glucose: 70%
+  // Basal: 12%, IOB/COB: 18%, Glucose: the rest (70% with both tracks shown)
   const BASAL_RATIO = 0.12;
   const IOB_RATIO = 0.18;
-  const GLUCOSE_RATIO = 0.70;
 
-  const basalHeight = $derived(Math.round(height * BASAL_RATIO));
-  const iobHeight = $derived(Math.round(height * IOB_RATIO));
+  // A track left out by the `tracks` prop gives its height to glucose; one toggled off
+  // in the legend keeps its slot, as before.
+  const basalTrackEnabled = $derived(tracks?.basal ?? true);
+  const iobTrackEnabled = $derived(tracks?.iobCob ?? true);
+  const basalHeight = $derived(basalTrackEnabled ? Math.round(height * BASAL_RATIO) : 0);
+  const iobHeight = $derived(iobTrackEnabled ? Math.round(height * IOB_RATIO) : 0);
   const glucoseHeight = $derived(height - basalHeight - iobHeight);
 
   // ===== X DOMAIN =====
   const xDomain = $derived.by((): [Date, Date] => {
+    if (xDomainProp) return xDomainProp;
     const g = data.glucoseData;
     if (g.length === 0) {
       const now = new Date();
@@ -75,7 +100,6 @@
 
   const maxBasalRate = $derived(data.maxBasalRate > 0 ? data.maxBasalRate : 2.5);
   const maxIob = $derived(data.maxIob > 0 ? data.maxIob : 3);
-  const maxCob = $derived(data.maxCob > 0 ? data.maxCob : 60);
   const glucoseYMax = $derived(data.thresholds.glucoseYMax > 0 ? data.thresholds.glucoseYMax : 300);
   const highThreshold = $derived(data.thresholds.high);
   const lowThreshold = $derived(data.thresholds.low);
@@ -88,8 +112,7 @@
   );
 
   // Stale basal: none in the package version (no live sync), always null
-  // eslint-disable-next-line prefer-const
-  let staleBasalData: { start: Date; end: Date } | null = null;
+  const staleBasalData: { start: Date; end: Date } | null = null;
 
   // ===== LEGEND TOGGLE STATE =====
   let showBasal = $state(true);
@@ -105,7 +128,8 @@
   let showActivitySpans = $state(false);
   let expandedPumpModes = $state(false);
 
-  const showIobTrack = $derived(showIob || showCob);
+  const showIobTrack = $derived(iobTrackEnabled && (showIob || showCob));
+  const showBasalTrack = $derived(basalTrackEnabled && showBasal);
 
   // ===== DIALOG STATE =====
   let glucoseDialogOpen = $state(false);
@@ -191,7 +215,7 @@
   const findActiveProfile = (t: Date) => {
     const s = findActiveSpanRaw(profileSpans, t);
     if (!s) return undefined;
-    return { ...withDisplay(s), profileName: (s.metadata?.profileName as string) ?? s.state ?? '' };
+    return { ...withDisplay(s), profileName: metadataString(s.metadata, 'profileName') ?? s.state ?? '' };
   };
   const findActiveActivities = (t: Date) => findAllActiveSpansRaw(activitySpans, t).map(withDisplay);
   const findActiveTempBasal = (t: Date) => {
@@ -199,8 +223,7 @@
     if (!s) return undefined;
     return {
       ...withDisplay(s),
-      rate: (s.metadata?.rate as number) ?? (s.metadata?.absolute as number) ?? null,
-      percent: (s.metadata?.percent as number) ?? null,
+      ...tempBasalFields(s.metadata),
     };
   };
   const findActiveBasalDelivery = (t: Date) => {
@@ -282,18 +305,14 @@
     return idx >= 2 ? glucoseData[idx - 2]?.sgv : undefined;
   });
 
-  const isStaleBasalAtInspection = $derived.by(() => {
-    const stale = staleBasalData as { start: Date; end: Date } | null;
-    if (!inspectionTime || !stale) return false;
-    const t = inspectionTime.getTime();
-    return t >= stale.start.getTime() && t <= stale.end.getTime();
-  });
+  // Basal is never stale without live sync; see staleBasalData.
+  const isStaleBasalAtInspection = false;
 
   // Tracker markers with display range for legend
   const scheduledTrackerMarkers = $derived(data.trackerMarkers);
 </script>
 
-<div style="width: {width ? width + 'px' : '100%'};">
+<div class="w-(--chart-width)" style:--chart-width={width ? `${width}px` : '100%'}>
   <!-- Legend -->
   {#if showLegend}
   <ChartLegend
@@ -336,8 +355,8 @@
   {/if}
 
   <!-- Basal Chart -->
-  {#if showBasal}
-    <div style="height: {basalHeight}px;">
+  {#if showBasalTrack}
+    <div class="h-(--track-height)" style:--track-height="{basalHeight}px">
       <Chart
         data={basalData}
         x={(d) => new Date(d.timestamp ?? 0)}
@@ -363,8 +382,7 @@
                 ...s,
                 displayStart: s.startTime,
                 displayEnd: s.endTime ?? new Date(),
-                rate: (s.metadata?.rate as number) ?? (s.metadata?.absolute as number) ?? null,
-                percent: (s.metadata?.percent as number) ?? null,
+                ...tempBasalFields(s.metadata),
               }))}
               {staleBasalData}
               {maxBasalRate}
@@ -374,8 +392,11 @@
               {basalAxisScale}
               {context}
               {showBasal}
-              onPointClick={handleBasalPointClick}
+              onPointClick={inspectable ? handleBasalPointClick : undefined}
             />
+            {#if now}
+              <Rule x={now} class="stroke-foreground/40" stroke-dasharray="2,3" />
+            {/if}
           </Svg>
         {/snippet}
       </Chart>
@@ -383,7 +404,7 @@
   {/if}
 
   <!-- Glucose Chart -->
-  <div style="height: {glucoseHeight}px;">
+  <div class="h-(--track-height)" style:--track-height="{glucoseHeight}px">
     <Chart
       data={glucoseData}
       x="time"
@@ -410,10 +431,16 @@
             {highThreshold}
             {lowThreshold}
             contextWidth={context.width}
-            onPointClick={handleGlucosePointClick}
+            onPointClick={inspectable ? handleGlucosePointClick : undefined}
             {heartRateSeries}
             {stepSeries}
           />
+          {#if predictions}
+            <PredictionTrack {predictions} {glucoseScale} />
+          {/if}
+          {#if now}
+            <Rule x={now} class="stroke-foreground/40" stroke-dasharray="2,3" />
+          {/if}
           <Axis
             placement="bottom"
             format="hour"
@@ -454,7 +481,7 @@
 
   <!-- IOB/COB Chart -->
   {#if showIobTrack}
-    <div style="height: {iobHeight}px;">
+    <div class="h-(--track-height)" style:--track-height="{iobHeight}px">
       <Chart
         data={iobData}
         x="time"
@@ -490,8 +517,11 @@
               {context}
               onMarkerClick={handleMarkerClick}
               {showIobTrack}
-              onPointClick={handleIobPointClick}
+              onPointClick={inspectable ? handleIobPointClick : undefined}
             />
+            {#if now}
+              <Rule x={now} class="stroke-foreground/40" stroke-dasharray="2,3" />
+            {/if}
           </Svg>
         {/snippet}
       </Chart>
@@ -500,6 +530,7 @@
 </div>
 
 <!-- Inspection Dialogs -->
+{#if dialog && badge && button}
 <GlucoseInspectionDialog
   open={glucoseDialogOpen}
   timestamp={inspectionTime ?? new Date()}
@@ -568,3 +599,4 @@
   {badge}
   {button}
 />
+{/if}

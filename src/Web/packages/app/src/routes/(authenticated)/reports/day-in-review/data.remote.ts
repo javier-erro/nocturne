@@ -30,15 +30,20 @@ export const getDayInReviewData = query(
 
 		// Resolve the patient's timezone so the day boundaries are their day, not the server's
 		const timezone = await getPatientTimeZone();
-		const { start: dayStart, end: dayEnd } = getLocalDayBoundariesUtc(dateParam, timezone);
+		const { start, end } = getLocalDayBoundariesUtc(dateParam, timezone);
+		const dayStart = start.toISOString();
+		const dayEnd = end.toISOString();
 
-		// Fetch v4 data + APS snapshots for historical predictions
-		const [entriesResponse, bolusResponse, carbResponse, apsResponse] = await Promise.all([
-			apiClient.sensorGlucose.getAll(dayStart, dayEnd, 10000),
-			apiClient.bolus.getAll(dayStart, dayEnd, 1000),
-			apiClient.nutrition.getCarbIntakes(dayStart, dayEnd, 1000),
-			getApsSnapshots({ from: dayStart.getTime(), to: dayEnd.getTime(), limit: 1000, sort: 'timestamp_asc' }),
-		]);
+		// Fetch v4 data, APS snapshots for historical predictions, and insulin delivery stats
+		// (scheduled vs additional basal breakdown), none of which depends on another
+		const [entriesResponse, bolusResponse, carbResponse, apsResponse, insulinDelivery] =
+			await Promise.all([
+				apiClient.sensorGlucose.getAll(dayStart, dayEnd, 10000),
+				apiClient.bolus.getAll(dayStart, dayEnd, 1000),
+				apiClient.nutrition.getCarbIntakes(dayStart, dayEnd, 1000),
+				getApsSnapshots({ from: dayStart, to: dayEnd, limit: 1000, sort: 'timestamp_asc' }),
+				getInsulinDeliveryStatistics({ startDate: dayStart, endDate: dayEnd }),
+			]);
 
 		const entries = entriesResponse.data ?? [];
 		const boluses = bolusResponse.data ?? [];
@@ -52,6 +57,8 @@ export const getDayInReviewData = query(
 					boluses,
 					carbIntakes,
 					population: 0 as const, // Type1Adult
+					startDate: dayStart,
+					endDate: dayEnd,
 				})
 			: null;
 
@@ -63,12 +70,6 @@ export const getDayInReviewData = query(
 				? await apiClient.statistics.calculateTreatmentSummary({ boluses, carbIntakes })
 				: null);
 
-		// Fetch insulin delivery stats (includes scheduled vs additional basal breakdown)
-		const insulinDelivery = await getInsulinDeliveryStatistics({
-			startDate: dayStart,
-			endDate: dayEnd,
-		});
-
 		return {
 			date: dateParam,
 			entries,
@@ -79,8 +80,8 @@ export const getDayInReviewData = query(
 			insulinDelivery,
 			apsSnapshots,
 			dateRange: {
-				from: dayStart.toISOString(),
-				to: dayEnd.toISOString(),
+				from: dayStart,
+				to: dayEnd,
 			},
 		};
 	}

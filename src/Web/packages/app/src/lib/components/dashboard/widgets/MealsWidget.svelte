@@ -3,13 +3,13 @@
   import { Badge } from "$lib/components/ui/badge";
   import { getRealtimeStore } from "$lib/stores/realtime-store.svelte";
   import { time } from "$lib/utils/formatting";
-  import { UtensilsCrossed } from "lucide-svelte";
+  import UtensilsCrossed from "@lucide/svelte/icons/utensils-crossed";
 
   const realtimeStore = getRealtimeStore();
 
   // Get recent carb intakes from the last 6 hours
   const recentMeals = $derived.by(() => {
-    const sixHoursAgo = realtimeStore.now - 6 * 60 * 60 * 1000;
+    const sixHoursAgo = realtimeStore.nowMinute - 6 * 60 * 60 * 1000;
     return realtimeStore.carbIntakes
       .filter((c) => (c.mills ?? 0) > sixHoursAgo && (c.carbs ?? 0) > 0)
       .sort((a, b) => (b.mills ?? 0) - (a.mills ?? 0))
@@ -30,7 +30,7 @@
     <div class="space-y-2">
       <div class="flex items-center justify-between">
         <span class="text-2xl font-bold">{totalCarbs}g</span>
-        <Badge variant="secondary" class="text-xs">
+        <Badge variant="secondary">
           {recentMeals.length} meal{recentMeals.length !== 1 ? "s" : ""}
         </Badge>
       </div>
@@ -40,8 +40,8 @@
         {/if}
       </div>
       <div class="flex flex-wrap gap-1 mt-1">
-        {#each recentMeals.slice(0, 3) as carbIntake}
-          <Badge variant="outline" class="text-xs">
+        {#each recentMeals.slice(0, 3) as carbIntake (carbIntake.id)}
+          <Badge variant="outline">
             {carbIntake.carbs ?? 0}g
           </Badge>
         {/each}

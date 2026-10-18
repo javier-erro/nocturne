@@ -88,13 +88,6 @@ public class RoleService : IRoleService
         return entity != null ? MapToModel(entity) : null;
     }
 
-    public async Task<Role?> GetRoleByNameAsync(string name)
-    {
-        var entity = await _dbContext.Roles.FirstOrDefaultAsync(r => r.Name == name);
-
-        return entity != null ? MapToModel(entity) : null;
-    }
-
     public async Task<Role> CreateRoleAsync(Role role)
     {
         // Check for duplicate name
@@ -111,7 +104,6 @@ public class RoleService : IRoleService
             Description = role.Description,
             Permissions = role.Permissions,
             IsSystemRole = role.IsSystemRole,
-            CreatedAt = DateTime.UtcNow,
         };
 
         _dbContext.Roles.Add(entity);
@@ -193,34 +185,6 @@ public class RoleService : IRoleService
         return true;
     }
 
-    public async Task<List<Subject>> GetSubjectsInRoleAsync(Guid roleId)
-    {
-        // Load the assignments with included subject navigation property
-        var assignments = await _dbContext
-            .SubjectRoles.Where(sr => sr.RoleId == roleId)
-            .Include(sr => sr.Subject)
-            .ToListAsync();
-
-        // Filter out any null navigations (i.e. inconsistent data) and map to model
-        var subjects = assignments
-            .Where(sr => sr.Subject != null)
-            .Select(sr => sr.Subject!)
-            .ToList();
-
-        return subjects
-            .Select(s => new Subject
-            {
-                Id = s.Id,
-                Name = s.Name,
-                Type = SubjectType.User, // Default type since entity doesn't track type
-                Email = s.Email,
-                IsActive = s.IsActive,
-                CreatedAt = s.CreatedAt,
-                LastLoginAt = s.LastLoginAt,
-            })
-            .ToList();
-    }
-
     public async Task<int> InitializeDefaultRolesAsync()
     {
         int created = 0;
@@ -237,7 +201,6 @@ public class RoleService : IRoleService
                     Description = description,
                     Permissions = permissions.ToList(),
                     IsSystemRole = true,
-                    CreatedAt = DateTime.UtcNow,
                 };
 
                 _dbContext.Roles.Add(entity);

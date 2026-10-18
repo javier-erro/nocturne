@@ -44,13 +44,6 @@ public class TenantMemberService : ITenantMemberService
             .ToListAsync(ct);
     }
 
-    public async Task<int> GetMemberCountAsync(Guid tenantId, CancellationToken ct = default)
-    {
-        await using var context = await _factory.CreateTenantPinnedContextAsync(tenantId, ct);
-        return await context.TenantMembers.AsNoTracking()
-            .CountAsync(tm => tm.TenantId == tenantId, ct);
-    }
-
     public async Task<List<string>> GetMemberRoleNamesAsync(Guid subjectId, Guid tenantId, CancellationToken ct = default)
     {
         await using var context = await _factory.CreateTenantPinnedContextAsync(tenantId, ct);
@@ -62,7 +55,7 @@ public class TenantMemberService : ITenantMemberService
             .ToListAsync(ct);
     }
 
-    public async Task<IReadOnlySet<string>?> GetEffectivePermissionsAsync(
+    public async Task<TenantMemberAccess?> GetMemberAccessAsync(
         Guid subjectId, Guid tenantId, CancellationToken ct = default)
     {
         await using var context = await _factory.CreateTenantPinnedContextAsync(tenantId, ct);
@@ -77,9 +70,8 @@ public class TenantMemberService : ITenantMemberService
             return null;
         }
 
-        return membership.MemberRoles
-            .SelectMany(mr => mr.TenantRole.Permissions)
-            .Union(membership.DirectPermissions ?? [])
-            .ToHashSet();
+        var effectivePermissions = membership.EffectivePermissions().ToHashSet();
+
+        return new TenantMemberAccess(effectivePermissions, membership.LimitTo24Hours);
     }
 }

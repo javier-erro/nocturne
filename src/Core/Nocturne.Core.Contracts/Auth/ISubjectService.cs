@@ -56,19 +56,22 @@ public interface ISubjectService
 
     /// <summary>
     /// Atomically remove an OIDC identity from a subject, enforcing the primary-factor rule
-    /// (at least one primary factor — passkey or OIDC identity — must remain after removal).
+    /// (at least one factor counted by <see cref="CountPrimaryAuthFactorsAsync"/> must remain).
     /// The check and the delete run inside a serializable transaction to prevent TOCTOU races.
     /// </summary>
     Task<FactorRemovalResult> TryRemoveOidcIdentityAsync(Guid subjectId, Guid identityId);
 
     /// <summary>
     /// Atomically remove a passkey credential from a subject, enforcing the primary-factor rule
-    /// (at least one primary factor — passkey or OIDC identity — must remain after removal).
+    /// (at least one factor counted by <see cref="CountPrimaryAuthFactorsAsync"/> must remain).
     /// The check and the delete run inside a serializable transaction to prevent TOCTOU races.
     /// </summary>
     Task<FactorRemovalResult> TryRemovePasskeyCredentialAsync(Guid subjectId, Guid credentialId);
 
-    /// <summary>Returns the total number of primary authentication factors (passkeys + OIDC identities) for a subject.</summary>
+    /// <summary>
+    /// Returns the total number of primary authentication factors for a subject: passkeys plus
+    /// OIDC identities whose provider is enabled.
+    /// </summary>
     /// <param name="subjectId">Subject identifier.</param>
     Task<int> CountPrimaryAuthFactorsAsync(Guid subjectId);
 
@@ -117,13 +120,6 @@ public interface ISubjectService
     /// <param name="subjectId">Subject identifier</param>
     /// <returns>True if deactivated, false if not found</returns>
     Task<bool> DeactivateSubjectAsync(Guid subjectId);
-
-    /// <summary>
-    /// Get all subjects with optional filtering
-    /// </summary>
-    /// <param name="filter">Optional filter criteria</param>
-    /// <returns>List of subjects</returns>
-    Task<List<Subject>> GetSubjectsAsync(SubjectFilter? filter = null);
 
     /// <summary>
     /// Get roles assigned to a subject
@@ -207,50 +203,4 @@ public class SubjectCreationResult
     /// Created subject
     /// </summary>
     public required Subject Subject { get; set; }
-}
-
-/// <summary>
-/// Filter criteria for querying subjects
-/// </summary>
-public class SubjectFilter
-{
-    /// <summary>
-    /// Filter by subject type
-    /// </summary>
-    public SubjectType? Type { get; set; }
-
-    /// <summary>
-    /// Filter by active status
-    /// </summary>
-    public bool? IsActive { get; set; }
-
-    /// <summary>
-    /// Filter by OIDC issuer
-    /// </summary>
-    public string? OidcIssuer { get; set; }
-
-    /// <summary>
-    /// Search by name (contains)
-    /// </summary>
-    public string? NameContains { get; set; }
-
-    /// <summary>
-    /// Search by email (contains)
-    /// </summary>
-    public string? EmailContains { get; set; }
-
-    /// <summary>
-    /// Filter by role
-    /// </summary>
-    public string? HasRole { get; set; }
-
-    /// <summary>
-    /// Maximum number of results
-    /// </summary>
-    public int Limit { get; set; } = 100;
-
-    /// <summary>
-    /// Number of results to skip
-    /// </summary>
-    public int Offset { get; set; } = 0;
 }

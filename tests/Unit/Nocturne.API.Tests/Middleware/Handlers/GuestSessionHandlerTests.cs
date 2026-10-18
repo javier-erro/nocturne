@@ -60,6 +60,7 @@ public class GuestSessionHandlerTests
             TenantId = sp.GetRequiredService<ITenantAccessor>().TenantId,
         });
         services.AddScoped<IGuestLinkService, GuestLinkService>();
+        services.AddScoped<GrantRevocationService>();
         var provider = services.BuildServiceProvider();
 
         _handler = new GuestSessionHandler(
@@ -166,6 +167,19 @@ public class GuestSessionHandlerTests
     }
 
     [Fact]
+    public async Task NoResolvedTenant_KeepsTheCookie()
+    {
+        // The guest cookie is host-only, so on a single-tenant apex it also reaches that apex's
+        // cross-tenant paths. Clearing it there signed the guest out on their next page.
+        var grantId = await SeedActivatedGrantAsync(_tenantId);
+        var context = BuildContext(tenantId: null, ProtectCookie(grantId));
+
+        await _handler.AuthenticateAsync(context);
+
+        context.Response.Headers.SetCookie.ToString().Should().NotContain(CookieName);
+    }
+
+    [Fact]
     public async Task RevokedGrant_IsRejectedWithoutWaitingForCacheExpiry()
     {
         var grantId = await SeedActivatedGrantAsync(_tenantId);
@@ -175,7 +189,8 @@ public class GuestSessionHandlerTests
 
         await using (var ctx = new NocturneDbContext(_dbOptions) { TenantId = _tenantId })
         {
-            var service = new GuestLinkService(ctx, _sessionCache, NullLogger<GuestLinkService>.Instance);
+            var service = new GuestLinkService(
+                ctx, _sessionCache, new GrantRevocationService(_sessionCache), NullLogger<GuestLinkService>.Instance);
             (await service.RevokeAsync(grantId, _dataOwnerId)).Should().BeTrue();
         }
 
@@ -185,13 +200,33 @@ public class GuestSessionHandlerTests
         result.ShouldSkip.Should().BeFalse();
     }
 
-    private async Task<Guid> SeedActivatedGrantAsync(Guid tenantId)
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ClampedGuestLink_AuthenticatesClamped(bool limitTo24Hours)
+    {
+        // The guest branch of MemberScopeMiddleware never reads a membership, so the grant's own
+        // limit is the only thing that can clamp a guest.
+        var grantId = await SeedActivatedGrantAsync(_tenantId, limitTo24Hours);
+
+        var result = await _handler.AuthenticateAsync(BuildContext(_tenantId, ProtectCookie(grantId)));
+
+        result.Succeeded.Should().BeTrue();
+        result.AuthContext!.LimitTo24Hours.Should().Be(limitTo24Hours);
+    }
+
+    private static IReadOnlySet<string> Unbounded() =>
+        new HashSet<string>(StringComparer.Ordinal) { Scope.FullAccess };
+
+    private async Task<Guid> SeedActivatedGrantAsync(Guid tenantId, bool limitTo24Hours = false)
     {
         await using var ctx = new NocturneDbContext(_dbOptions) { TenantId = tenantId };
-        var service = new GuestLinkService(ctx, _sessionCache, NullLogger<GuestLinkService>.Instance);
+        var service = new GuestLinkService(
+            ctx, _sessionCache, new GrantRevocationService(_sessionCache), NullLogger<GuestLinkService>.Instance);
 
         var created = await service.CreateGuestLinkAsync(
-            _dataOwnerId, _dataOwnerId, "Caregiver", "https://acme.example.test");
+            _dataOwnerId, _dataOwnerId, "Caregiver", "https://acme.example.test",
+            Unbounded(), limitTo24Hours: limitTo24Hours);
         var activation = await service.ActivateAsync(created.Code, "1.2.3.4", "TestAgent");
 
         activation.Success.Should().BeTrue();

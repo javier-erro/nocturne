@@ -1,5 +1,8 @@
+using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
 using Nocturne.Infrastructure.Data.Entities;
+using Nocturne.Core.Models;
+using Nocturne.Infrastructure.Data.Entities.V4;
 
 namespace Nocturne.Infrastructure.Data.Extensions;
 
@@ -35,6 +38,26 @@ public static class SoftDeleteDedupExtensions
         => source.Where(e => e.DeletedAt == null || EF.Property<bool>(e, DeletedByUserProperty));
 
     /// <summary>
+    /// The rows of <typeparamref name="TEntity"/> in the context's tenant whose latest delete was the
+    /// user's: the tombstones <see cref="WhereBlocksRecreation{TEntity}"/> holds against a re-upload.
+    /// </summary>
+    public static IQueryable<TEntity> UserTombstones<TEntity>(this NocturneDbContext ctx)
+        where TEntity : class, ITenantScoped, ISoftDeletable
+        => ctx.Set<TEntity>().UserTombstones(ctx);
+
+    /// <summary>
+    /// The rows of <paramref name="source"/> that are
+    /// <see cref="UserTombstones{TEntity}(NocturneDbContext)"/>: the soft-delete query filter is
+    /// lifted and the tenant predicate re-applied.
+    /// </summary>
+    public static IQueryable<TEntity> UserTombstones<TEntity>(this IQueryable<TEntity> source, NocturneDbContext ctx)
+        where TEntity : class, ITenantScoped, ISoftDeletable
+        => source.IgnoreQueryFilters().AsNoTracking()
+            .Where(e => e.TenantId == ctx.TenantId
+                     && e.DeletedAt != null
+                     && EF.Property<bool>(e, DeletedByUserProperty));
+
+    /// <summary>
     /// Of the rows <see cref="WhereBlocksRecreation{TEntity}"/> kept for one external identity, the
     /// row that governs a re-upload of it: the live row when there is one — the write upserts that —
     /// otherwise the user tombstone, which blocks the write. The partial unique index counts live
@@ -58,46 +81,160 @@ public static class SoftDeleteDedupExtensions
     /// Returns the subset of <paramref name="legacyIds"/> that must be skipped on bulk
     /// insert, per <see cref="WhereBlocksRecreation{TEntity}"/>.
     /// </summary>
-    public static async Task<HashSet<string>> GetBlockingLegacyIdsAsync<TEntity>(
+    public static async Task<RecreationBlocks<string>> GetBlockingLegacyIdsAsync<TEntity>(
         this NocturneDbContext ctx,
         HashSet<string> legacyIds,
         CancellationToken ct = default)
         where TEntity : class, IV4Entity
     {
         if (legacyIds.Count == 0)
-            return new HashSet<string>();
+            return RecreationBlocks<string>.None;
 
         var blocking = await ctx.Set<TEntity>().IgnoreQueryFilters().AsNoTracking()
             .Where(e => e.TenantId == ctx.TenantId
                      && e.LegacyId != null
                      && legacyIds.Contains(e.LegacyId))
             .WhereBlocksRecreation()
-            .Select(e => e.LegacyId!)
+            .Select(e => new { Key = e.LegacyId!, Live = e.DeletedAt == null })
             .ToListAsync(ct);
 
-        return blocking.ToHashSet();
+        return RecreationBlocks<string>.From(blocking.Select(b => (b.Key, b.Live)));
     }
 
     /// <summary>
-    /// Sibling of <see cref="GetBlockingLegacyIdsAsync{TEntity}"/> for entities keyed
+    /// The ids among <paramref name="originalIds"/> a re-upload would find held, per
+    /// <see cref="WhereBlocksRecreation{TEntity}"/>, on a table keyed by <c>OriginalId</c> rather than
+    /// <c>LegacyId</c>.
+    /// </summary>
+    public static Task<IReadOnlySet<string>> GetHeldOriginalIdsAsync<TEntity>(
+        this NocturneDbContext ctx,
+        IReadOnlyCollection<string> originalIds,
+        CancellationToken ct = default)
+        where TEntity : class, ITenantScoped, ISoftDeletable, IOriginalIdentified
+        => ctx.GetHeldOriginalIdsAsync<TEntity>(originalIds, _ => true, ct);
+
+    /// <summary>
+    /// As <see cref="GetHeldOriginalIdsAsync{TEntity}(NocturneDbContext, IReadOnlyCollection{string}, CancellationToken)"/>,
+    /// counting only the rows <paramref name="within"/> keeps: on a table whose dedup key pairs
+    /// <c>OriginalId</c> with another column, the rows sharing the rest of the write's key.
+    /// </summary>
+    public static async Task<IReadOnlySet<string>> GetHeldOriginalIdsAsync<TEntity>(
+        this NocturneDbContext ctx,
+        IReadOnlyCollection<string> originalIds,
+        Expression<Func<TEntity, bool>> within,
+        CancellationToken ct = default)
+        where TEntity : class, ITenantScoped, ISoftDeletable, IOriginalIdentified
+    {
+        if (originalIds.Count == 0)
+            return RecreationBlocks<string>.None.Held;
+
+        var ids = originalIds.ToList();
+        var held = await ctx.Set<TEntity>().IgnoreQueryFilters().AsNoTracking()
+            .Where(e => e.TenantId == ctx.TenantId
+                     && e.OriginalId != null
+                     && ids.Contains(e.OriginalId))
+            .Where(within)
+            .WhereBlocksRecreation()
+            .Select(e => e.OriginalId!)
+            .ToListAsync(ct);
+
+        return held.ToHashSet(StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// The legacy ids among <paramref name="incoming"/> that must not be inserted: as the id-set
+    /// overload, except that a user tombstone does not hold a legacy id against a row that
+    /// <see cref="TreatmentClientId.IsDifferentRecord"/> says is another client record. The unique
+    /// legacy-id index counts live rows only, so the new row inserts beside the tombstone.
+    /// </summary>
+    public static async Task<RecreationBlocks<string>> GetBlockingLegacyIdsAsync<TEntity>(
+        this NocturneDbContext ctx,
+        IEnumerable<TEntity> incoming,
+        CancellationToken ct = default)
+        where TEntity : class, IV4Entity
+    {
+        var clientIds = new Dictionary<string, string?>(StringComparer.Ordinal);
+        foreach (var entity in incoming)
+        {
+            if (!string.IsNullOrEmpty(entity.LegacyId))
+                clientIds.TryAdd(entity.LegacyId, TreatmentClientId.Of((entity as V4TimeSeriesEntityBase)?.AdditionalPropertiesJson));
+        }
+
+        if (!typeof(V4TimeSeriesEntityBase).IsAssignableFrom(typeof(TEntity)) || clientIds.Values.All(id => id is null))
+            return await ctx.GetBlockingLegacyIdsAsync<TEntity>(clientIds.Keys.ToHashSet(StringComparer.Ordinal), ct);
+
+        var legacyIds = clientIds.Keys.ToList();
+        var blocking = await ctx.Set<TEntity>().IgnoreQueryFilters().AsNoTracking()
+            .Where(e => e.TenantId == ctx.TenantId
+                     && e.LegacyId != null
+                     && legacyIds.Contains(e.LegacyId))
+            .WhereBlocksRecreation()
+            .Select(e => new
+            {
+                Key = e.LegacyId!,
+                Live = e.DeletedAt == null,
+                Json = EF.Property<string?>(e, nameof(V4TimeSeriesEntityBase.AdditionalPropertiesJson)),
+            })
+            .ToListAsync(ct);
+
+        return RecreationBlocks<string>.From(blocking
+            .Where(b => b.Live || !TreatmentClientId.IsDifferentRecord(b.Key, clientIds[b.Key],TreatmentClientId.Of(b.Json)))
+            .Select(b => (b.Key, b.Live)));
+    }
+
+    /// <summary>
+    /// Sibling of <see cref="GetBlockingLegacyIdsAsync{TEntity}(NocturneDbContext, HashSet{string}, CancellationToken)"/> for entities keyed
     /// by <c>CorrelationId</c> (Guid) instead of <c>LegacyId</c> (string). Currently
     /// used by <c>DeviceStatusExtrasEntity</c> only.
     /// </summary>
-    public static async Task<HashSet<Guid>> GetBlockingCorrelationIdsAsync(
+    public static async Task<RecreationBlocks<Guid>> GetBlockingCorrelationIdsAsync(
         this NocturneDbContext ctx,
         HashSet<Guid> correlationIds,
         CancellationToken ct = default)
     {
         if (correlationIds.Count == 0)
-            return new HashSet<Guid>();
+            return RecreationBlocks<Guid>.None;
 
         var blocking = await ctx.DeviceStatusExtras.IgnoreQueryFilters().AsNoTracking()
             .Where(e => e.TenantId == ctx.TenantId
                      && correlationIds.Contains(e.CorrelationId))
             .WhereBlocksRecreation()
-            .Select(e => e.CorrelationId)
+            .Select(e => new { Key = e.CorrelationId, Live = e.DeletedAt == null })
             .ToListAsync(ct);
 
-        return blocking.ToHashSet();
+        return RecreationBlocks<Guid>.From(blocking.Select(b => (b.Key, b.Live)));
+    }
+}
+
+/// <summary>
+/// The identities a bulk insert must skip, per
+/// <see cref="SoftDeleteDedupExtensions.WhereBlocksRecreation{TEntity}"/>, split by what holds them.
+/// </summary>
+/// <param name="Held">Every blocked identity: skip these.</param>
+/// <param name="DeletedByUser">
+/// The identities in <paramref name="Held"/> held only by a row the user deleted. The rest are held by
+/// a live row, so the record is already stored and skipping it loses nothing.
+/// </param>
+public sealed record RecreationBlocks<TKey>(IReadOnlySet<TKey> Held, IReadOnlySet<TKey> DeletedByUser)
+    where TKey : notnull
+{
+    public static RecreationBlocks<TKey> None { get; } = new(new HashSet<TKey>(), new HashSet<TKey>());
+
+    /// <summary>
+    /// A tombstone and a live row can share an identity (see
+    /// <see cref="SoftDeleteDedupExtensions.GoverningRow{TEntity}"/>), and the live row governs.
+    /// </summary>
+    public static RecreationBlocks<TKey> From(IEnumerable<(TKey Key, bool Live)> rows)
+    {
+        var held = new HashSet<TKey>();
+        var live = new HashSet<TKey>();
+        foreach (var (key, isLive) in rows)
+        {
+            held.Add(key);
+            if (isLive)
+                live.Add(key);
+        }
+
+        return new RecreationBlocks<TKey>(held, held.Except(live).ToHashSet());
     }
 }

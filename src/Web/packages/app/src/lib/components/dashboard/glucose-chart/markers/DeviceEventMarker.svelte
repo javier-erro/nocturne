@@ -1,6 +1,7 @@
 <script lang="ts">
   import { DeviceEventIcon } from "$lib/components/icons";
   import type { DeviceEventType } from "$lib/api";
+  import { getGlucoseChartContext, markerInk } from "../chart-context.svelte";
 
   interface Props {
     xPos: number;
@@ -8,11 +9,16 @@
     eventType?: DeviceEventType;
     color: string;
     treatmentId?: string;
+    /** Inferred from a warm-up gap rather than recorded; drawn with a dashed ring. */
+    isInferred?: boolean;
     onMarkerClick?: (treatmentId: string) => void;
   }
 
-  let { xPos, yPos, eventType, color, treatmentId, onMarkerClick }: Props =
+  let { xPos, yPos, eventType, color, treatmentId, isInferred = false, onMarkerClick }: Props =
     $props();
+
+  const chart = getGlucoseChartContext();
+  const ink = $derived(markerInk(chart, color));
 
   const handleClick = $derived(
     treatmentId && onMarkerClick
@@ -25,6 +31,7 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <g
   transform="translate({xPos}, {yPos})"
+  data-inferred={isInferred || undefined}
   onclick={handleClick}
   class={handleClick ? "cursor-pointer" : ""}
 >
@@ -32,14 +39,15 @@
   <circle
     r="12"
     fill="var(--background)"
-    stroke={color}
+    stroke={ink}
     stroke-width="2"
+    stroke-dasharray={isInferred ? "4 3" : undefined}
     class="opacity-95 {handleClick ? 'hover:opacity-100 transition-opacity' : ''}"
   />
   <!-- Icon using foreignObject to embed Lucide component -->
   <foreignObject x="-10" y="-10" width="20" height="20">
     <div class="flex items-center justify-center w-full h-full">
-      <DeviceEventIcon {eventType} size={16} {color} />
+      <DeviceEventIcon {eventType} size={16} color={ink} />
     </div>
   </foreignObject>
 </g>

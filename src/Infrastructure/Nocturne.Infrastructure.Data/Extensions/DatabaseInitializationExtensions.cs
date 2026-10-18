@@ -51,7 +51,9 @@ public static class DatabaseInitializationExtensions
         // crash loop. Give migration DDL ample time to complete.
         optionsBuilder.UseNpgsql(
             dataSource,
-            npgsql => npgsql.CommandTimeout((int)TimeSpan.FromHours(1).TotalSeconds));
+            npgsql => npgsql
+                .CommandTimeout((int)TimeSpan.FromHours(1).TotalSeconds)
+                .UseNocturneMigrations());
         optionsBuilder.AddInterceptors(interceptor);
 
         var context = new NocturneDbContext(optionsBuilder.Options);
@@ -184,13 +186,14 @@ public static class DatabaseInitializationExtensions
             {
                 var governingScope = ShareDataCategories.GoverningScopeFor(table);
                 var recencyColumn = ShareDataCategories.RecencyColumnFor(table);
+                var spanEndColumn = ShareDataCategories.SpanEndColumnFor(table);
                 // Wrap each table's DROP+CREATE in a transaction so the "RLS enabled, no
                 // restrictive policy" state is never observable to a concurrent reader.
                 await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
                 await using (var command = connection.CreateCommand())
                 {
                     command.Transaction = transaction;
-                    command.CommandText = ShareRlsPolicy.BuildPolicySql(table, governingScope, recencyColumn);
+                    command.CommandText = ShareRlsPolicy.BuildPolicySql(table, governingScope, recencyColumn, spanEndColumn);
                     await command.ExecuteNonQueryAsync(cancellationToken);
                 }
                 await transaction.CommitAsync(cancellationToken);

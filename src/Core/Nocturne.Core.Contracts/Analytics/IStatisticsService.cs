@@ -77,14 +77,15 @@ public interface IStatisticsService
     );
 
     /// <summary>
-    /// Assess the reliability of a statistics block based on data duration and completeness.
+    /// Assess the reliability of a statistics block based on data duration and reading count.
     /// Returns raw facts (days of data, reading count, recommended minimum) so the frontend
-    /// can compose a plain-English reliability message.
+    /// can compose a plain-English reliability message. The recommended minimum follows
+    /// <paramref name="windowDays"/>, the length of the requested window, up to the 14-day clinical standard.
     /// </summary>
     StatisticReliability AssessReliability(
         int daysOfData,
         int readingCount,
-        int recommendedMinimumDays = 14
+        int windowDays
     );
 
     /// <summary>
@@ -94,8 +95,10 @@ public interface IStatisticsService
         IEnumerable<SensorGlucose> entries,
         IEnumerable<Bolus> boluses,
         IEnumerable<CarbIntake> carbIntakes,
+        int windowDays,
         DiabetesPopulation population = DiabetesPopulation.Type1Adult,
-        ExtendedAnalysisConfig? config = null
+        ExtendedAnalysisConfig? config = null,
+        TimeZoneInfo? timeZone = null
     );
 
     // Glycemic Variability
@@ -107,7 +110,7 @@ public interface IStatisticsService
     /// <param name="entries"><see cref="SensorGlucose"/> entries with timestamps for time-dependent metrics.</param>
     /// <returns>
     /// A <see cref="GlycemicVariability"/> containing all variability metrics, or null for fewer
-    /// than two values.
+    /// than two plausible glucose values.
     /// </returns>
     GlycemicVariability? CalculateGlycemicVariability(
         IEnumerable<double> values,
@@ -210,11 +213,36 @@ public interface IStatisticsService
     );
 
     /// <summary>
-    /// Calculate averaged statistics bucketed by time of day from <see cref="SensorGlucose"/> entries.
+    /// Averaged statistics for each hour of the day, bucketed on the tenant's local clock rather
+    /// than on each reading's own recorded offset.
     /// </summary>
     /// <param name="entries"><see cref="SensorGlucose"/> entries.</param>
-    /// <returns>Time-of-day averaged statistics for AGP-style charts.</returns>
-    IEnumerable<AveragedStats> CalculateAveragedStats(IEnumerable<SensorGlucose> entries);
+    /// <param name="tenantTimeZone">
+    /// The tenant's local timezone, or null when none resolves, in which case each reading is placed
+    /// by its own recorded offset.
+    /// </param>
+    /// <returns>All 24 hours in order, midnight first.</returns>
+    IEnumerable<AveragedStats> CalculateAveragedStats(
+        IEnumerable<SensorGlucose> entries,
+        TimeZoneInfo? tenantTimeZone
+    );
+
+    /// <summary>
+    /// The band edges <see cref="CalculateAveragedStats"/> and <see cref="CalculateHourlyPatterns"/>
+    /// classify each reading on, as a fresh copy on every call: changing it changes nothing else.
+    /// </summary>
+    GlycemicThresholds HourlyBandThresholds { get; }
+
+    /// <summary>
+    /// The hourly-patterns report: each hour's statistics and split around the consensus range,
+    /// with the best, worst and most-below-range hours among those with enough data to rank.
+    /// </summary>
+    /// <param name="entries"><see cref="SensorGlucose"/> entries.</param>
+    /// <param name="tenantTimeZone">As for <see cref="CalculateAveragedStats"/>.</param>
+    HourlyPatterns CalculateHourlyPatterns(
+        IEnumerable<SensorGlucose> entries,
+        TimeZoneInfo? tenantTimeZone
+    );
 
     /// <summary>
     /// Mean glucose per weekday in each five-minute slot of the day, bucketed on the tenant's
@@ -237,8 +265,9 @@ public interface IStatisticsService
     /// <param name="boluses"><see cref="Bolus"/> records.</param>
     /// <param name="carbIntakes"><see cref="CarbIntake"/> records.</param>
     /// <param name="foodsByCarbIntake">Optional food breakdown keyed by <see cref="CarbIntake"/> ID.</param>
+    /// <param name="dayCount">Calendar days the records cover, for the per-day averages.</param>
     /// <returns>A <see cref="TreatmentSummary"/> with insulin and carb statistics.</returns>
-    TreatmentSummary CalculateTreatmentSummary(IEnumerable<Bolus> boluses, IEnumerable<CarbIntake> carbIntakes, IReadOnlyDictionary<Guid, List<TreatmentFood>>? foodsByCarbIntake = null);
+    TreatmentSummary CalculateTreatmentSummary(IEnumerable<Bolus> boluses, IEnumerable<CarbIntake> carbIntakes, IReadOnlyDictionary<Guid, List<TreatmentFood>>? foodsByCarbIntake = null, int dayCount = 1);
 
     /// <summary>
     /// Calculate overall daily averages from per-day data points.
@@ -246,20 +275,6 @@ public interface IStatisticsService
     /// <param name="dailyDataPoints">Per-day data points.</param>
     /// <returns>Overall averages, or <c>null</c> if no data.</returns>
     OverallAverages? CalculateOverallAverages(IEnumerable<DayData> dailyDataPoints);
-
-    /// <summary>
-    /// Get total daily insulin from a <see cref="TreatmentSummary"/>.
-    /// </summary>
-    /// <param name="treatmentSummary">Treatment summary to read from.</param>
-    /// <returns>Total insulin in units.</returns>
-    double GetTotalInsulin(TreatmentSummary treatmentSummary);
-
-    /// <summary>
-    /// Get bolus insulin as a percentage of total daily insulin.
-    /// </summary>
-    /// <param name="treatmentSummary">Treatment summary to read from.</param>
-    /// <returns>Bolus percentage (0-100).</returns>
-    double GetBolusPercentage(TreatmentSummary treatmentSummary);
 
     /// <summary>
     /// Calculate comprehensive insulin delivery statistics.
@@ -300,13 +315,21 @@ public interface IStatisticsService
     double MmolToMGDL(double mmol);
 
     // Comprehensive Analytics
+    /// <param name="windowDays">Length of the requested window in days, which sets the reliability minimum. A caller with no window passes 14.</param>
+    /// <param name="timeZone">Zone in which readings are counted into days of data. Without it, UTC.</param>
+    /// <param name="deviceEvents">The period's device events, from which
+    /// <see cref="DataQuality.SensorWarmups"/> counts the sensor sessions begun, recorded or inferred,
+    /// one per change however many sources logged it. Without them it is 0.</param>
     GlucoseAnalytics AnalyzeGlucoseData(
         IEnumerable<SensorGlucose> entries,
         IEnumerable<Bolus> boluses,
         IEnumerable<CarbIntake> carbIntakes,
+        int windowDays,
         ExtendedAnalysisConfig? config = null,
         DateTime? startDate = null,
-        DateTime? endDate = null
+        DateTime? endDate = null,
+        IEnumerable<DeviceEvent>? deviceEvents = null,
+        TimeZoneInfo? timeZone = null
     );
 
     /// <summary>

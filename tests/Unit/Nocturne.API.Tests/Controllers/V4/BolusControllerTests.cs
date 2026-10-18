@@ -4,8 +4,9 @@ using Microsoft.AspNetCore.Mvc;
 using Moq;
 using Microsoft.AspNetCore.Mvc.Abstractions;
 using Microsoft.AspNetCore.Mvc.Filters;
-using Microsoft.AspNetCore.Mvc.Infrastructure;
+using Nocturne.API.Tests.TestDoubles;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.Options;
 using Nocturne.API.Controllers.V4.Treatments;
 using Nocturne.API.Filters;
 using Nocturne.API.Models.Requests.V4;
@@ -328,7 +329,7 @@ public class BolusControllerTests
         _repoMock
             .Setup(r => r.BulkCreateAsync(It.IsAny<IEnumerable<Bolus>>(), It.IsAny<WriteOrigin>(), It.IsAny<CancellationToken>()))
             .Callback<IEnumerable<Bolus>, WriteOrigin, CancellationToken>((b, _, _) => persisted = b.ToList())
-            .ReturnsAsync((IEnumerable<Bolus> b, WriteOrigin _, CancellationToken _) => b);
+            .ReturnsAsync((IEnumerable<Bolus> b, WriteOrigin _, CancellationToken _) => [.. b]);
 
         await CreateController().CreateBulk(requests);
 
@@ -477,26 +478,6 @@ public class BolusControllerTests
             .Which.Detail.Should().Contain("sync identifier 'sync-1'");
     }
 
-    /// <remarks>
-    /// The MVC-registered factory is exercised end to end by
-    /// <see cref="GoldenFiles.RecreationBlockedPipelineTests"/>; here it only has to carry the
-    /// status, title and detail the filter hands it.
-    /// </remarks>
-    private static ProblemDetailsFactory EchoingProblemDetailsFactory()
-    {
-        var factory = new Mock<ProblemDetailsFactory>();
-        factory
-            .Setup(f => f.CreateProblemDetails(
-                It.IsAny<HttpContext>(), It.IsAny<int?>(), It.IsAny<string?>(),
-                It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<string?>()))
-            .Returns((HttpContext _, int? status, string? title, string? type, string? detail, string? instance) =>
-                new ProblemDetails
-                {
-                    Status = status, Title = title, Type = type, Detail = detail, Instance = instance,
-                });
-        return factory.Object;
-    }
-
     private static ObjectResult RunRecreationBlockedFilter(ControllerBase controller, Exception exception)
     {
         var context = new ExceptionContext(
@@ -506,7 +487,7 @@ public class BolusControllerTests
             Exception = exception,
         };
 
-        new RecreationBlockedFilter(EchoingProblemDetailsFactory()).OnException(context);
+        new RecreationBlockedFilter(new EchoingProblemDetailsFactory(), Options.Create(new JsonOptions())).OnException(context);
 
         context.ExceptionHandled.Should().BeTrue();
         return context.Result.Should().BeOfType<ObjectResult>().Subject;

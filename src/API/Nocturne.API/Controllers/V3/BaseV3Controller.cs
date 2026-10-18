@@ -199,12 +199,63 @@ public abstract class BaseV3Controller<T> : ControllerBase
 
         // Parse date fields
         var dateFields = new HashSet<string> { "date", "srvModified", "srvCreated", "created_at" };
-        if (dateFields.Contains(field) && DateTimeOffset.TryParse(rawValue, out var dateValue))
+        if (dateFields.Contains(field) && UploaderTimestamp.TryParse(rawValue, out var dateValue))
         {
             return dateValue.ToUnixTimeMilliseconds();
         }
 
         return rawValue;
+    }
+
+    /// <summary>
+    /// Every operator on a field lands in one operator object, as Nightscout's storage layer builds
+    /// it, so <c>date$gte=A&amp;date$lte=B</c> is a closed range.
+    /// </summary>
+    internal static string? ConvertFilterCriteriaToFindQuery(List<V3FilterCriteria>? filterCriteria)
+    {
+        if (filterCriteria == null || filterCriteria.Count == 0)
+            return null;
+
+        var operatorsByField = new Dictionary<string, Dictionary<string, object?>>();
+
+        foreach (var criteria in filterCriteria)
+        {
+            var mongoOp = criteria.Operator switch
+            {
+                "eq" => "$eq",
+                "ne" => "$ne",
+                "gt" => "$gt",
+                "gte" => "$gte",
+                "lt" => "$lt",
+                "lte" => "$lte",
+                "in" => "$in",
+                "nin" => "$nin",
+                "re" => "$regex",
+                _ => null,
+            };
+            if (mongoOp == null)
+                continue;
+
+            if (!operatorsByField.TryGetValue(criteria.Field, out var operators))
+            {
+                operators = new Dictionary<string, object?>();
+                operatorsByField[criteria.Field] = operators;
+            }
+
+            operators[mongoOp] = mongoOp == "$eq" ? criteria.Value ?? "" : criteria.Value;
+        }
+
+        if (operatorsByField.Count == 0)
+            return null;
+
+        var conditions = operatorsByField.ToDictionary(
+            pair => pair.Key,
+            pair => pair.Value.Count == 1 && pair.Value.TryGetValue("$eq", out var equality)
+                ? equality
+                : pair.Value
+        );
+
+        return JsonSerializer.Serialize(conditions);
     }
 
     /// <summary>
@@ -302,8 +353,9 @@ public abstract class BaseV3Controller<T> : ControllerBase
             Response.Headers["Link"] = string.Join(", ", links);
         }
 
-        // Set cache control headers
-        Response.Headers["Cache-Control"] = "public, max-age=60";
+        // Tenant reads must not be shared-cacheable: UseResponseCaching answers before
+        // authentication runs, so a stored entry would outlive the credential check.
+        Response.Headers["Cache-Control"] = "private, max-age=60";
         Response.Headers["Last-Modified"] = effectiveLastModified.UtcDateTime.ToString("R");
         Response.Headers["Vary"] = "Accept, If-Modified-Since, If-None-Match";
     }
@@ -399,7 +451,16 @@ public abstract class BaseV3Controller<T> : ControllerBase
     /// <returns>Nightscout-compatible success response</returns>
     protected ActionResult CreateV3SuccessResponse(object result)
     {
-        return Ok(new { status = 200, result });
+        return Ok(new V3Envelope<object> { Result = result });
+    }
+
+    /// <summary>
+    /// Create the V3 success response for a delete: <c>{"status": 200}</c> with no result.
+    /// AAPS treats any other success status on DELETE as unknown and stops syncing the collection.
+    /// </summary>
+    protected ActionResult CreateV3DeleteResponse()
+    {
+        return Ok(new { status = 200 });
     }
 
     /// <summary>
@@ -420,9 +481,6 @@ public abstract class BaseV3Controller<T> : ControllerBase
     /// Returns the Nightscout V3-compatible envelope: <c>{"status": 200, "result": [...]}</c>.
     /// </summary>
     /// <typeparam name="TItem">The type of items in the collection.</typeparam>
-    /// <param name="data">Response data.</param>
-    /// <param name="parameters">The <see cref="V3QueryParameters"/> used for field selection and pagination.</param>
-    /// <param name="totalCount">Total count of items for pagination headers.</param>
     /// <returns>A <see cref="V3CollectionResponse{T}"/> wrapped in the Nightscout V3 envelope.</returns>
     protected IActionResult CreateV3CollectionResponse<TItem>(
         IEnumerable<TItem> data,
@@ -530,7 +588,7 @@ public abstract class BaseV3Controller<T> : ControllerBase
             var value = values.FirstOrDefault();
             if (!string.IsNullOrEmpty(value))
             {
-                if (DateTimeOffset.TryParse(value, out var result))
+                if (UploaderTimestamp.TryParse(value, out var result))
                 {
                     return result;
                 }
@@ -544,26 +602,12 @@ public abstract class BaseV3Controller<T> : ControllerBase
     #region Protected Helper Methods
 
     /// <summary>
-    /// Convert V3 filter to V1 find query string
+    /// The V3 JSON filter as a find query. The find parser reads the JSON form directly, so the
+    /// operator and value structure passes through untouched.
     /// </summary>
     /// <param name="filter">V3 filter object</param>
-    /// <returns>V1 find query string</returns>
-    protected string? ConvertV3FilterToV1Find(JsonElement? filter)
-    {
-        if (filter == null || !filter.HasValue)
-            return null;
-
-        try
-        {
-            // Convert JSON filter to MongoDB query string
-            return filter.Value.GetRawText();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to convert V3 filter to V1 find query");
-            return null;
-        }
-    }
+    /// <returns>The filter's JSON text, or null when there is no filter</returns>
+    protected static string? ConvertV3FilterToV1Find(JsonElement? filter) => filter?.GetRawText();
 
     /// <summary>
     /// Extract sort direction from V3 sort parameter
@@ -592,22 +636,13 @@ public abstract class BaseV3Controller<T> : ControllerBase
     /// <returns>Type value or null</returns>
     protected string? ExtractTypeFromFilter(JsonElement? filter)
     {
-        if (filter == null || !filter.HasValue)
-            return null;
-
-        try
+        if (
+            filter is { ValueKind: JsonValueKind.Object } value
+            && value.TryGetProperty("type", out var typeProperty)
+            && typeProperty.ValueKind == JsonValueKind.String
+        )
         {
-            if (
-                filter.Value.ValueKind == JsonValueKind.Object
-                && filter.Value.TryGetProperty("type", out var typeProperty)
-            )
-            {
-                return typeProperty.GetString();
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to extract type from V3 filter");
+            return typeProperty.GetString();
         }
 
         return null;
@@ -676,37 +711,6 @@ public abstract class BaseV3Controller<T> : ControllerBase
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to get last modified timestamp");
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Parse create request from request body
-    /// </summary>
-    /// <typeparam name="TRequest">Type of the request object</typeparam>
-    /// <returns>Parsed request object or null</returns>
-    protected async Task<TRequest?> ParseCreateRequest<TRequest>()
-        where TRequest : class
-    {
-        try
-        {
-            if (Request.ContentLength == 0)
-                return null;
-
-            using var reader = new StreamReader(Request.Body);
-            var body = await reader.ReadToEndAsync();
-
-            if (string.IsNullOrEmpty(body))
-                return null;
-
-            return JsonSerializer.Deserialize<TRequest>(
-                body,
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true }
-            );
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to parse create request");
             return null;
         }
     }

@@ -170,6 +170,83 @@ public class MembershipRequestServiceTests : IDisposable
             It.IsAny<CancellationToken>()), Times.Once);
     }
 
+    [Fact]
+    public async Task CreateRequestAsync_NotifiesExactlyTheActiveNonSystemMembersWhoCanApprove()
+    {
+        var direct = AddMember(directPermissions: [Scope.MembersManage]);
+        var viaWildcardRole = AddMember(rolePermissions: [Scope.FullAccess]);
+        AddMember(rolePermissions: [Scope.GlucoseRead], directPermissions: [Scope.MembersInvite]);
+        AddMember();
+        AddMember(rolePermissions: [Scope.FullAccess], isSystemSubject: true);
+        AddMember(directPermissions: [Scope.MembersManage], isActive: false);
+
+        await _service.CreateRequestAsync(_tenantId, _subjectId, null);
+
+        NotifiedSubjectIds().Should().BeEquivalentTo(
+            [_adminSubjectId.ToString(), direct.ToString(), viaWildcardRole.ToString()]);
+    }
+
+    private Guid AddMember(
+        string[]? rolePermissions = null,
+        string[]? directPermissions = null,
+        bool isSystemSubject = false,
+        bool isActive = true)
+    {
+        var subjectId = Guid.CreateVersion7();
+        var memberId = Guid.CreateVersion7();
+        _dbContext.Subjects.Add(new SubjectEntity
+        {
+            Id = subjectId,
+            Name = $"Member {subjectId}",
+            IsSystemSubject = isSystemSubject,
+            IsActive = isActive,
+        });
+
+        var member = new TenantMemberEntity
+        {
+            Id = memberId,
+            TenantId = _tenantId,
+            SubjectId = subjectId,
+            DirectPermissions = directPermissions?.ToList(),
+        };
+
+        if (rolePermissions != null)
+        {
+            var roleId = Guid.CreateVersion7();
+            _dbContext.TenantRoles.Add(new TenantRoleEntity
+            {
+                Id = roleId,
+                TenantId = _tenantId,
+                Name = $"Role {roleId}",
+                Slug = $"role-{roleId}",
+                Permissions = rolePermissions.ToList(),
+                SysCreatedAt = DateTime.UtcNow,
+                SysUpdatedAt = DateTime.UtcNow,
+            });
+            member.MemberRoles =
+            [
+                new TenantMemberRoleEntity
+                {
+                    Id = Guid.CreateVersion7(),
+                    TenantMemberId = memberId,
+                    TenantRoleId = roleId,
+                    SysCreatedAt = DateTime.UtcNow,
+                },
+            ];
+        }
+
+        _dbContext.TenantMembers.Add(member);
+        _dbContext.SaveChanges();
+        return subjectId;
+    }
+
+    private IReadOnlyList<string> NotifiedSubjectIds() =>
+        _notificationService.Invocations
+            .Where(i => i.Method.Name == nameof(IInAppNotificationService.CreateNotificationAsync)
+                && (string)i.Arguments[1] == "membership.requested")
+            .Select(i => (string)i.Arguments[0])
+            .ToList();
+
     // ──────────────────────────────────────────────
     // ApproveRequestAsync
     // ──────────────────────────────────────────────
@@ -198,6 +275,53 @@ public class MembershipRequestServiceTests : IDisposable
         _tenantService.Verify(t => t.AddMemberAsync(
             _tenantId, _subjectId, roleIds,
             null, null, false, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task ApproveRequestAsync_ByAClampedApprover_AddsAClampedMember()
+    {
+        await _service.CreateRequestAsync(_tenantId, _subjectId, null);
+        var request = await _dbContext.MembershipRequests.FirstAsync();
+        var roleIds = new List<Guid> { _adminRoleId };
+
+        var result = await _service.ApproveRequestAsync(
+            request.Id, _tenantId, roleIds, _adminSubjectId, [Scope.FullAccess], limitTo24Hours: true);
+
+        result.Success.Should().BeTrue();
+        _tenantService.Verify(t => t.AddMemberAsync(
+            _tenantId, _subjectId, roleIds,
+            null, null, true, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task ApproveRequestAsync_ClampedIntoAnAdministeringRole_IsRefused()
+    {
+        var settingsRoleId = Guid.CreateVersion7();
+        _dbContext.TenantRoles.Add(new TenantRoleEntity
+        {
+            Id = settingsRoleId,
+            TenantId = _tenantId,
+            Name = "Settings",
+            Slug = "settings",
+            Permissions = [Scope.TenantSettings],
+            SysCreatedAt = DateTime.UtcNow,
+            SysUpdatedAt = DateTime.UtcNow,
+        });
+        await _dbContext.SaveChangesAsync();
+        await _service.CreateRequestAsync(_tenantId, _subjectId, null);
+        var request = await _dbContext.MembershipRequests.FirstAsync();
+
+        var result = await _service.ApproveRequestAsync(
+            request.Id, _tenantId, [settingsRoleId], _adminSubjectId, [Scope.FullAccess], limitTo24Hours: true);
+
+        result.Success.Should().BeFalse();
+        result.Error.Should().Be(MemberScopeResolver.ExemptFromHistoryClampDetail);
+        _tenantService.Verify(t => t.AddMemberAsync(
+            It.IsAny<Guid>(), It.IsAny<Guid>(), It.IsAny<List<Guid>>(),
+            It.IsAny<List<string>?>(), It.IsAny<string?>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+        await _dbContext.Entry(request).ReloadAsync();
+        request.Status.Should().Be("pending");
     }
 
     [Fact]

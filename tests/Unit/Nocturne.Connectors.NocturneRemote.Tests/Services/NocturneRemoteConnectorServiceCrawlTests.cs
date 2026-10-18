@@ -90,6 +90,9 @@ public class NocturneRemoteConnectorServiceCrawlTests
         result.Success.Should().BeFalse();
         result.ItemsSynced.Should().BeEmpty();
         fixture.PublishedGlucose.Should().BeEmpty();
+        result.Errors.Should().ContainSingle()
+            .Which.Should().NotContain("see preceding connector logs",
+                "the response parsing cause must be visible in the connector status");
     }
 
     /// <summary>
@@ -223,6 +226,7 @@ public class NocturneRemoteConnectorServiceCrawlTests
             CancellationToken.None);
 
         result.Success.Should().BeTrue("no type the tenant enabled failed to sync");
+        handler.Requests.Where(url => url.Contains(NocturneRemoteConstants.SensorGlucose)).Should().ContainSingle();
         result.Errors.Should().BeEmpty();
         result.ItemsSynced.Should().BeEquivalentTo(new Dictionary<SyncDataType, int>
         {
@@ -352,6 +356,73 @@ public class NocturneRemoteConnectorServiceCrawlTests
         handler.CrawlOf(NocturneRemoteConstants.Boluses).Should()
             .Contain($"from={latestTreatment.AddMinutes(-5):o}",
                 "the treatment family resumes from its own newest stored record, not glucose's");
+    }
+
+    /// <summary>
+    /// Each treatment type is read from its own endpoint, so one can fail for a day while its
+    /// siblings publish. Resuming it from the treatment family's newest record would let a sibling's
+    /// fresher data carry the bound past the day it still owes.
+    /// </summary>
+    [Fact]
+    public async Task SyncDataAsync_WhenOneTreatmentTypeLagsItsSiblings_ResumesItFromItsOwnWatermark()
+    {
+        var latestBolus = new DateTime(2026, 5, 30, 0, 0, 0, DateTimeKind.Utc);
+        var latestCarbs = new DateTime(2026, 5, 31, 23, 0, 0, DateTimeKind.Utc);
+        var glucoseFrom = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc);
+        var handler = new RemoteFakeHandler();
+        var fixture = new ServiceFixture(
+            handler,
+            latestTreatment: latestCarbs,
+            latestByType: new Dictionary<SyncDataType, DateTime>
+            {
+                [SyncDataType.Boluses] = latestBolus,
+                [SyncDataType.CarbIntake] = latestCarbs,
+            });
+
+        await fixture.Service.SyncDataAsync(
+            new SyncRequest
+            {
+                From = glucoseFrom,
+                To = null,
+                DataTypes = [SyncDataType.Glucose, SyncDataType.Boluses, SyncDataType.CarbIntake],
+            },
+            fixture.Config,
+            CancellationToken.None);
+
+        handler.CrawlOf(NocturneRemoteConstants.Boluses).Should()
+            .Contain($"from={latestBolus.AddMinutes(-5):o}",
+                "boluses resume from their own newest record, not the carbs that published past them");
+        handler.CrawlOf(NocturneRemoteConstants.CarbIntake).Should()
+            .Contain($"from={latestCarbs.AddMinutes(-5):o}");
+    }
+
+    /// <summary>
+    /// State spans are read from their own endpoint like every other type, so the glucose cursor
+    /// advancing past a range their crawl failed to read must not take them with it.
+    /// </summary>
+    [Fact]
+    public async Task SyncDataAsync_WhenStateSpansLagGlucose_ResumesThemFromTheirOwnWatermark()
+    {
+        var latestStateSpan = new DateTime(2026, 5, 30, 0, 0, 0, DateTimeKind.Utc);
+        var glucoseFrom = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc);
+        var handler = new RemoteFakeHandler();
+        var fixture = new ServiceFixture(handler, latestStateSpan: latestStateSpan);
+
+        await fixture.Service.SyncDataAsync(
+            new SyncRequest
+            {
+                From = glucoseFrom,
+                To = null,
+                DataTypes = [SyncDataType.Glucose, SyncDataType.StateSpans],
+            },
+            fixture.Config,
+            CancellationToken.None);
+
+        handler.CrawlOf(NocturneRemoteConstants.SensorGlucose).Should()
+            .Contain($"from={glucoseFrom:o}");
+        handler.CrawlOf(NocturneRemoteConstants.StateSpans).Should()
+            .Contain($"from={latestStateSpan.AddMinutes(-5):o}",
+                "state spans resume from their own newest record, not glucose's");
     }
 
     /// <summary>
@@ -554,10 +625,46 @@ public class NocturneRemoteConnectorServiceCrawlTests
 
         result.Success.Should().BeFalse();
         result.Message.Should().Be("Authentication failed");
+        handler.Requests.Should().ContainSingle("the auth probe has one attempt and a 401 ends the run");
         result.Errors.Should().ContainSingle()
             .Which.Should().Be($"Authentication failed for {DataSources.NocturneRemoteConnector}");
         handler.Requests.Should().NotContain(url => url.Contains(NocturneRemoteConstants.Boluses),
             "a rejected credential fails the run before the enabled types are reached");
+    }
+
+    [Fact]
+    public async Task SyncDataAsync_WhenRetryReturnsMalformedJson_ReportsTheTerminalFailure()
+    {
+        var handler = new RemoteFakeHandler()
+            .Serve(NocturneRemoteConstants.SensorGlucose,
+                RemoteFakeHandler.Status(HttpStatusCode.ServiceUnavailable),
+                RemoteFakeHandler.Json("invalid-json"));
+        var fixture = new ServiceFixture(handler, config: NewConfig(maxRetryAttempts: 2));
+
+        var result = await fixture.Service.SyncDataAsync(
+            new SyncRequest { DataTypes = [SyncDataType.Glucose] }, fixture.Config, CancellationToken.None);
+
+        result.Success.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.Should().NotContain("HTTP 503");
+        result.Errors.Single().Should().Contain("invalid start");
+    }
+
+    [Fact]
+    public async Task SyncDataAsync_WhenTheRemoteTransportFails_ReportsTheTransportCause()
+    {
+        var handler = new RemoteFakeHandler()
+            .BreakTransport(NocturneRemoteConstants.SensorGlucose,
+                new HttpRequestException("TLS handshake failed"));
+        var fixture = new ServiceFixture(handler);
+
+        var result = await fixture.Service.SyncDataAsync(
+            new SyncRequest { DataTypes = [SyncDataType.Glucose] },
+            fixture.Config,
+            CancellationToken.None);
+
+        result.Success.Should().BeFalse();
+        result.Message.Should().Be("The remote Nocturne instance at https://remote.example did not answer: TLS handshake failed");
+        result.Errors.Should().ContainSingle().Which.Should().Be(result.Message);
     }
 
     /// <summary>
@@ -678,7 +785,9 @@ public class NocturneRemoteConnectorServiceCrawlTests
             RemoteFakeHandler handler,
             NocturneRemoteConnectorConfiguration? config = null,
             DateTime? latestTreatment = null,
-            bool treatmentWatermarkFails = false)
+            bool treatmentWatermarkFails = false,
+            IReadOnlyDictionary<SyncDataType, DateTime>? latestByType = null,
+            DateTime? latestStateSpan = null)
         {
             Config = config ?? NewConfig();
 
@@ -694,10 +803,27 @@ public class NocturneRemoteConnectorServiceCrawlTests
             var treatments = new Mock<ITreatmentPublisher>();
             var watermark = treatments.Setup(p => p.GetLatestTreatmentTimestampAsync(
                 It.IsAny<string>(), It.IsAny<CancellationToken>()));
+            var typeWatermark = treatments.Setup(p => p.GetLatestTreatmentTimestampAsync(
+                It.IsAny<SyncDataType>(), It.IsAny<string>(), It.IsAny<CancellationToken>()));
             if (treatmentWatermarkFails)
+            {
                 watermark.ThrowsAsync(new HttpRequestException("the API did not answer"));
+                typeWatermark.ThrowsAsync(new HttpRequestException("the API did not answer"));
+            }
             else
+            {
                 watermark.ReturnsAsync(latestTreatment);
+                typeWatermark.ReturnsAsync((SyncDataType type, string _, CancellationToken _) =>
+                    latestByType is not null && latestByType.TryGetValue(type, out var latest)
+                        ? latest
+                        : latestTreatment);
+            }
+
+            var metadata = new Mock<IMetadataPublisher>();
+            metadata
+                .Setup(p => p.GetLatestStateSpanTimestampAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(latestStateSpan);
+
             treatments
                 .Setup(p => p.PublishBolusesAsync(
                     It.IsAny<IEnumerable<Bolus>>(), It.IsAny<string>(),
@@ -711,7 +837,7 @@ public class NocturneRemoteConnectorServiceCrawlTests
             publisher.Setup(p => p.Glucose).Returns(glucose.Object);
             publisher.Setup(p => p.Treatments).Returns(treatments.Object);
             publisher.Setup(p => p.Device).Returns(Mock.Of<IDevicePublisher>());
-            publisher.Setup(p => p.Metadata).Returns(Mock.Of<IMetadataPublisher>());
+            publisher.Setup(p => p.Metadata).Returns(metadata.Object);
 
             Service = new NocturneRemoteConnectorService(
                 new HttpClient(handler),
@@ -743,6 +869,7 @@ public class NocturneRemoteConnectorServiceCrawlTests
 
         private readonly Dictionary<string, Queue<HttpResponseMessage>> _pages = new(StringComparer.Ordinal);
         private readonly Dictionary<string, HttpStatusCode> _broken = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, Exception> _transportFailures = new(StringComparer.Ordinal);
 
         /// <summary>Every request made, so a test can assert on the range each crawl asked for.</summary>
         internal List<string> Requests { get; } = [];
@@ -772,6 +899,12 @@ public class NocturneRemoteConnectorServiceCrawlTests
         internal RemoteFakeHandler Break(string path, HttpStatusCode status)
         {
             _broken[path] = status;
+            return this;
+        }
+
+        internal RemoteFakeHandler BreakTransport(string path, Exception failure)
+        {
+            _transportFailures[path] = failure;
             return this;
         }
 
@@ -808,6 +941,9 @@ public class NocturneRemoteConnectorServiceCrawlTests
 
             if (_broken.TryGetValue(path, out var status))
                 return Task.FromResult(Status(status));
+
+            if (_transportFailures.TryGetValue(path, out var failure))
+                throw failure;
 
             if (IsAuthCheck(request))
                 return Task.FromResult(GlucosePage(total: 0));

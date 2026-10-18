@@ -7,10 +7,11 @@
   import { TextareaAutosize } from "$lib/components/ui/textarea";
   import { Input } from "$lib/components/ui/input";
   import { Checkbox } from "$lib/components/ui/checkbox";
-  import { Check } from "lucide-svelte";
+  import Check from "@lucide/svelte/icons/check";
   import { CompletionReason, TrackerCategory } from "$api";
   import * as trackersRemote from "$api/generated/trackers.generated.remote";
   import { useToastSubmission } from "$lib/forms";
+  import { tryGetRealtimeStore } from "$lib/stores/realtime-store.svelte";
   import { create as createDeviceEventForm } from "$api/generated/deviceEvents.generated.remote";
 
   interface TrackerCompletionDialogProps {
@@ -28,6 +29,8 @@
     onClose: () => void;
     onComplete?: () => void;
   }
+
+  const realtimeStore = tryGetRealtimeStore();
 
   let {
     open = $bindable(false),
@@ -131,11 +134,9 @@
       case TrackerCategory.Cannula:
       case TrackerCategory.Consumable:
         return [...consumableReasons, ...generalReasons];
-      case TrackerCategory.Battery:
-        // Battery uses general + failed (device failure)
-        return [CompletionReason.Failed, ...generalReasons];
       case TrackerCategory.Reminder:
       case TrackerCategory.Custom:
+      case TrackerCategory.Battery:
       default:
         return generalReasons;
     }
@@ -210,6 +211,7 @@
   class="hidden"
   {...createDeviceEventForm.for("tracker-complete").enhance(async ({ submit }) => {
     await submit();
+    if (createDeviceEventForm.for("tracker-complete").result) realtimeStore?.noteTreatmentWrite();
   })}
 >
   <input type="hidden" name="n:mills" value={deviceEventMills} />
@@ -221,7 +223,7 @@
 </form>
 
 <Dialog.Root bind:open>
-  <Dialog.Content>
+  <Dialog.Content data-testid="tracker-completion-dialog">
     <Dialog.Header>
       <Dialog.Title>Complete {instanceName}</Dialog.Title>
       <Dialog.Description>
@@ -244,7 +246,7 @@
             {completionReasonLabels[completionReason]}
           </Select.Trigger>
           <Select.Content>
-            {#each availableReasons as reason}
+            {#each availableReasons as reason (reason)}
               <Select.Item value={reason} label={completionReasonLabels[reason]} />
             {/each}
           </Select.Content>
@@ -261,7 +263,7 @@
       {#if definitionId}
         <div class="flex items-center gap-2">
           <Checkbox id="startAnother" bind:checked={startAnother} />
-          <Label for="startAnother" class="text-sm font-normal cursor-pointer">
+          <Label for="startAnother" variant="option" class="cursor-pointer">
             Start another {instanceName} after completion
           </Label>
         </div>

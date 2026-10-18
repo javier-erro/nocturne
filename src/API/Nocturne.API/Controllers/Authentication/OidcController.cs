@@ -4,8 +4,10 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using OpenApi.Remote.Attributes;
 using Nocturne.API.Authorization;
+using Nocturne.API.Controllers.V4.Identity;
 using Nocturne.API.Extensions;
 using Nocturne.API.Multitenancy;
+using Nocturne.API.Services.Auth;
 using Nocturne.Core.Constants;
 using Nocturne.Core.Models.Authorization;
 using Nocturne.Core.Contracts.Multitenancy;
@@ -91,6 +93,7 @@ public class OidcController : ControllerBase
                 Name = p.Name,
                 Icon = p.Icon,
                 ButtonColor = p.ButtonColor,
+                ButtonForegroundColor = ButtonColorContrast.ForegroundFor(p.ButtonColor),
             })
             .ToList();
 
@@ -662,6 +665,7 @@ public class OidcController : ControllerBase
                 IsPlatformAdmin = authContext.IsPlatformAdmin,
                 IsPlatformAccessGrant = authContext.AuthType == AuthType.PlatformAccess,
                 AvatarUrl = userInfo?.AvatarUrl,
+                Grant = await MyPermissionsController.TryBuildAsync(HttpContext),
             }
         );
     }
@@ -754,6 +758,12 @@ public class OidcProviderInfo
     /// Button color for UI
     /// </summary>
     public string? ButtonColor { get; set; }
+
+    /// <summary>
+    /// Text colour legible on <see cref="ButtonColor"/>; null when that is not a hex colour,
+    /// in which case the button keeps its themed style.
+    /// </summary>
+    public string? ButtonForegroundColor { get; set; }
 }
 
 /// <summary>
@@ -844,6 +854,12 @@ public class SessionInfo
     /// URL to the subject's avatar image
     /// </summary>
     public string? AvatarUrl { get; set; }
+
+    /// <summary>
+    /// The caller's grant on the resolved tenant, as <c>GET /api/v4/me/permissions</c> answers it;
+    /// null where that endpoint would refuse the caller.
+    /// </summary>
+    public MyPermissionsResponse? Grant { get; set; }
 }
 
 /// <summary>

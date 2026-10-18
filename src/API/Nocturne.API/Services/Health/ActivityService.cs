@@ -1,3 +1,4 @@
+using Nocturne.Core.Contracts.V4.Repositories;
 using Nocturne.API.Services.V4;
 using Nocturne.Core.Contracts.Health;
 using Nocturne.Core.Contracts.Legacy;
@@ -7,6 +8,7 @@ using Nocturne.Core.Contracts.Sleep;
 using Nocturne.Core.Contracts.V4;
 using Nocturne.Core.Models;
 using Nocturne.Core.Models.Authorization;
+using Nocturne.Core.Models.Queries;
 using Nocturne.API.Services.Realtime;
 using Nocturne.Infrastructure.Data.Mappers;
 
@@ -43,6 +45,11 @@ public class ActivityService : IActivityService
     /// what a caller may request.
     /// </summary>
     private const int MaxOverFetch = 100_000;
+
+    /// <summary>
+    /// Rows read from each source when a field filter is evaluated in memory after the fetch.
+    /// </summary>
+    private const int MaxFilteredFetch = 10_000;
 
     /// <summary>
     /// Every source <see cref="CountActivitiesByCategoryAsync"/> knows how to count, named by the
@@ -113,55 +120,68 @@ public class ActivityService : IActivityService
                 actualSkip
             );
 
+            var query = FindQuery.Parse(find);
+            var from = query.FromMills is { } fromMills
+                ? DateTimeOffset.FromUnixTimeMilliseconds(fromMills).UtcDateTime
+                : (DateTime?)null;
+            var to = query.ToMills is { } toMills
+                ? DateTimeOffset.FromUnixTimeMilliseconds(toMills).UtcDateTime
+                : (DateTime?)null;
+
             // Over-fetch from each source so we can merge and re-paginate. Clamped into range: a
             // large skip overflows the sum, and a non-positive fetch count faults every source
-            // query. Callers with no ceiling of their own rely on the upper bound here.
-            var fetchCount = (int)Math.Clamp((long)actualCount + actualSkip, 1, MaxOverFetch);
+            // query. Callers with no ceiling of their own rely on the upper bound here. A residual
+            // field filter runs after the fetch, so the page cannot be pushed down either.
+            var fetchCount = query.HasFieldFilters
+                ? MaxFilteredFetch
+                : (int)Math.Clamp((long)actualCount + actualSkip, 1, MaxOverFetch);
 
-            // Source 1: Regular activities from StateSpans (exercise, illness, travel — no longer sleep)
             var stateSpanActivities = await _stateSpanService.GetActivitiesAsync(
-                type: find,
                 count: fetchCount,
                 skip: 0,
+                from: from,
+                to: to,
                 cancellationToken: cancellationToken
             );
 
-            // Source 2: Heart rate records converted to Activity format
             var heartRates = await _heartRateService.GetHeartRatesAsync(
                 count: fetchCount,
                 skip: 0,
+                from: from,
+                to: to,
                 cancellationToken: cancellationToken
             );
             var heartRateActivities = heartRates.Select(ActivityDecomposer.HeartRateToActivity);
 
-            // Source 3: Step count records converted to Activity format
             var stepCounts = await _stepCountService.GetStepCountsAsync(
                 count: fetchCount,
                 skip: 0,
+                from: from,
+                to: to,
                 cancellationToken: cancellationToken
             );
             var stepCountActivities = stepCounts.Select(ActivityDecomposer.StepCountToActivity);
 
-            // Source 4: Sleep sessions projected back to Activity format.
-            // Sleep used to be a StateSpan filtered by `find`; honour that filter here
-            // so a request scoped to another type (e.g. exercise) doesn't pull in sleep.
-            var sleepActivities = Enumerable.Empty<Activity>();
-            if (string.IsNullOrEmpty(find) || ActivityStateSpanMapper.IsSleepType(find))
-            {
-                var sleepSessions = await _sleepService.GetSessionsAsync(
-                    limit: fetchCount,
-                    offset: 0,
-                    descending: true,
-                    cancellationToken: cancellationToken
-                );
-                sleepActivities = sleepSessions.Select(ActivityStateSpanMapper.SleepSessionToActivity);
-            }
+            var sleepSessions = await _sleepService.GetSessionsAsync(
+                from: from,
+                to: to,
+                limit: fetchCount,
+                offset: 0,
+                descending: true,
+                cancellationToken: cancellationToken
+            );
+            // The sleep read bounds by overlap; every other source bounds by start, as the find does.
+            var sleepActivities = sleepSessions
+                .Select(ActivityStateSpanMapper.SleepSessionToActivity)
+                .Where(a => (query.FromMills is not { } lower || a.Mills >= lower)
+                    && (query.ToMills is not { } upper || a.Mills <= upper));
 
-            // Merge all sources, sort by Mills descending, apply pagination
-            var merged = stateSpanActivities
+            var sources = stateSpanActivities
                 .Concat(heartRateActivities)
                 .Concat(stepCountActivities)
-                .Concat(sleepActivities)
+                .Concat(sleepActivities);
+
+            var merged = (query.HasFieldFilters ? sources.Where(a => query.MatchesResidual(a)) : sources)
                 .OrderByDescending(a => a.Mills)
                 .Skip(actualSkip)
                 .Take(actualCount)
@@ -244,12 +264,8 @@ public class ActivityService : IActivityService
     {
         try
         {
-            var activityList = activities.ToList();
-            _logger.LogDebug("Creating {Count} activity records", activityList.Count);
-
-            // Process documents (sanitization and timestamp conversion)
-            var processedActivities = _documentProcessingService.ProcessDocuments(activityList);
-            var processedList = processedActivities.ToList();
+            var processedList = PrepareForStorage(activities);
+            _logger.LogDebug("Creating {Count} activity records", processedList.Count);
 
             // Separate sensor data, sleep activities, and regular activities
             var regularActivities = new List<Activity>();
@@ -268,25 +284,16 @@ public class ActivityService : IActivityService
 
             var results = new List<Activity>();
 
-            // Process sensor data through decomposer (NOT stored as StateSpans)
+            // Only a user tombstone is skipped here. Any other failure of the sensor and sleep writes
+            // reaches the outer handler, which logs and rethrows it, so the uploader gets an error and
+            // does not advance its sync marker past a record never stored.
             foreach (var sensorActivity in sensorDataActivities)
             {
-                try
-                {
-                    await _activityDecomposer.DecomposeAsync(sensorActivity, WriteOrigin.Live, cancellationToken);
+                var decomposed = await _activityDecomposer.DecomposeAsync(sensorActivity, WriteOrigin.Live, cancellationToken);
+                if (decomposed.SkippedDeleted == 0)
                     results.Add(sensorActivity);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(
-                        ex,
-                        "Failed to decompose sensor data activity {Id}",
-                        sensorActivity.Id
-                    );
-                }
             }
 
-            // Route sleep-type activities to the dedicated sleep_sessions table
             foreach (var sleepActivity in sleepActivities)
             {
                 try
@@ -295,17 +302,9 @@ public class ActivityService : IActivityService
                     var created = await _sleepService.UpsertSessionAsync(session, cancellationToken);
                     results.Add(ActivityStateSpanMapper.SleepSessionToActivity(created));
                 }
-                catch (OperationCanceledException) { throw; }
-                catch (Exception ex)
+                catch (RecreationBlockedException)
                 {
-                    // Mirror the sensor-data branch: log and skip the failed record
-                    // rather than failing the whole batch. Covers the rare upsert
-                    // unique-constraint conflict (concurrent sync of the same record).
-                    _logger.LogError(
-                        ex,
-                        "Failed to create sleep session from activity {Id}",
-                        sleepActivity.Id
-                    );
+                    _logger.LogDebug("Skipped sleep activity {Id}: the user deleted it", sleepActivity.Id);
                 }
             }
 
@@ -356,6 +355,8 @@ public class ActivityService : IActivityService
         {
             _logger.LogDebug("Updating activity record with ID: {Id}", id);
 
+            activity = PrepareForStorage([activity]).Single();
+
             // Try sleep sessions first: GET projects sleep activities with the session Guid as id
             if (Guid.TryParse(id, out var sleepGuid))
             {
@@ -390,6 +391,10 @@ public class ActivityService : IActivityService
             {
                 var sleepSession = ActivityStateSpanMapper.ToSleepSession(activity);
                 sleepSession.OriginalId = id;
+                // A session Guid that missed the live lookup above may name a tombstone, which the
+                // upsert finds only by primary key.
+                if (Guid.TryParse(id, out _))
+                    sleepSession.Id = id;
 
                 var upsertedSession = await _sleepService.UpsertSessionAsync(sleepSession, cancellationToken);
                 var upsertedActivity = ActivityStateSpanMapper.SleepSessionToActivity(upsertedSession);
@@ -413,11 +418,30 @@ public class ActivityService : IActivityService
 
             return updatedActivity;
         }
+        catch (RecreationBlockedException)
+        {
+            _logger.LogDebug("Refused update of activity {Id}: the user deleted it", id);
+            throw;
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error updating activity record with ID: {Id}", id);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Sanitises and dates activities the same way for create and update. The client timestamp is
+    /// applied first because <see cref="IDocumentProcessingService.ProcessTimestamp"/> would date a
+    /// record by whole-second <c>created_at</c>, or by the time of receipt when it is absent.
+    /// </summary>
+    private List<Activity> PrepareForStorage(IEnumerable<Activity> activities)
+    {
+        var activityList = activities.ToList();
+        foreach (var activity in activityList)
+            ActivityDecomposer.ApplyClientTimestamp(activity);
+
+        return _documentProcessingService.ProcessDocuments(activityList).ToList();
     }
 
     /// <summary>
@@ -448,9 +472,10 @@ public class ActivityService : IActivityService
             _logger.LogDebug("Deleting activity record with ID: {Id}", id);
 
             // Attempt to delete decomposed records (heart rate / step count)
+            var decomposedDeleted = 0;
             try
             {
-                await _activityDecomposer.DeleteByLegacyIdAsync(id, WriteOrigin.Live, cancellationToken);
+                decomposedDeleted = await _activityDecomposer.DeleteByLegacyIdAsync(id, WriteOrigin.Live, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -477,21 +502,26 @@ public class ActivityService : IActivityService
                 }
             }
 
-            var deleted = await _stateSpanService.DeleteActivityAsync(id, cancellationToken);
+            var deletedIds = (await _stateSpanService.DeleteActivityAsync(id, cancellationToken)).ToList();
+            if (decomposedDeleted > 0 && !deletedIds.Contains(id))
+                deletedIds.Add(id);
 
-            if (deleted)
+            if (deletedIds.Count > 0)
             {
-                await _signalRBroadcastService.BroadcastStorageDeleteAsync(
-                    "activity",
-                    new StorageDeleteEvent("activity", id)
-                );
+                foreach (var deletedId in deletedIds)
+                {
+                    await _signalRBroadcastService.BroadcastStorageDeleteAsync(
+                        "activity",
+                        new StorageDeleteEvent("activity", deletedId)
+                    );
+                }
 
                 await _events.OnDeletedAsync(null, cancellationToken);
 
                 _logger.LogDebug("Successfully deleted activity record with ID: {Id}", id);
             }
 
-            return deleted;
+            return deletedIds.Count > 0;
         }
         catch (Exception ex)
         {
@@ -544,8 +574,7 @@ public class ActivityService : IActivityService
                     );
                 }
 
-                if (await _stateSpanService.DeleteActivityAsync(activity.Id, cancellationToken))
-                    deletedCount++;
+                deletedCount += (await _stateSpanService.DeleteActivityAsync(activity.Id, cancellationToken)).Count;
             }
 
             if (deletedCount > 0)

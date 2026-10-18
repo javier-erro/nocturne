@@ -12,12 +12,16 @@
 import { getContext, setContext } from "svelte";
 import { browser } from "$app/environment";
 import { goto } from "$app/navigation";
+import { resolve } from "$app/paths";
+import { toDate } from "$lib/utils/formatting";
+import { toIsoString } from "$lib/utils/api-date";
 import {
   getSessionInfo,
   refreshSession as refreshSessionRemote,
   logoutSession as logoutSessionRemote,
 } from "../../routes/(unauthenticated)/auth/auth.remote";
 import { remoteErrorMessage } from "$lib/api/remote-error";
+import { whenIdle } from "$lib/utils/when-idle";
 
 const AUTH_STORE_KEY = Symbol("auth-store");
 
@@ -30,7 +34,8 @@ export interface AuthUser {
   email?: string;
   roles: string[];
   permissions: string[];
-  expiresAt?: Date;
+  /** ISO 8601. */
+  expiresAt?: string;
   avatarUrl?: string;
 }
 
@@ -76,6 +81,7 @@ export class AuthStore {
   private _expiresAt = $state<Date | null>(null);
   private _expiryWarningShown = $state(false);
   private expiryCheckInterval: ReturnType<typeof setInterval> | null = null;
+  private cancelSessionLoad: (() => void) | null = null;
 
   expiresAt = $derived(this._expiresAt);
   expiryWarningShown = $derived(this._expiryWarningShown);
@@ -85,8 +91,7 @@ export class AuthStore {
    */
   timeUntilExpiry = $derived.by(() => {
     if (!this._expiresAt) return null;
-    const now = new Date();
-    const diff = this._expiresAt.getTime() - now.getTime();
+    const diff = this._expiresAt.getTime() - Date.now();
     return Math.max(0, Math.floor(diff / 1000));
   });
 
@@ -118,12 +123,14 @@ export class AuthStore {
     const authCookie = cookies.find((c) => c.trim().startsWith("IsAuthenticated="));
 
     if (authCookie) {
-      // We have an auth cookie, try to load the full session.
-      // Defer out of render context — the store is constructed inside the
-      // root layout's render, but `getSessionInfo().run()` rejects calls
-      // made during render.
+      // Nothing on first paint reads the session (the layout's server data carries the user and
+      // permissions), so it loads once the page is idle. That is also out of the render that
+      // constructs the store, where `getSessionInfo().run()` would reject.
       this._state = "loading";
-      queueMicrotask(() => this.loadSession());
+      this.cancelSessionLoad = whenIdle(() => {
+        this.cancelSessionLoad = null;
+        void this.loadSession();
+      });
     } else {
       this._state = "unauthenticated";
     }
@@ -137,8 +144,7 @@ export class AuthStore {
 
     this.expiryCheckInterval = setInterval(() => {
       if (this._expiresAt && this._state === "authenticated") {
-        const now = new Date();
-        if (now >= this._expiresAt) {
+        if (Date.now() >= this._expiresAt.getTime()) {
           // Session expired, trigger refresh
           this.refreshSession();
         } else if (!this._expiryWarningShown && this.isSessionExpiringSoon) {
@@ -178,10 +184,10 @@ export class AuthStore {
           email: session.email,
           roles: session.roles ?? [],
           permissions: session.permissions ?? [],
-          expiresAt: session.expiresAt ? new Date(session.expiresAt) : undefined,
+          expiresAt: toIsoString(session.expiresAt) ?? undefined,
           avatarUrl: session.avatarUrl,
         };
-        this._expiresAt = session.expiresAt ? new Date(session.expiresAt) : null;
+        this._expiresAt = toDate(session.expiresAt);
         this._state = "authenticated";
         this._expiryWarningShown = false;
       } else {
@@ -229,7 +235,7 @@ export class AuthStore {
     this._state = "unauthenticated";
 
     // Redirect to home
-    goto("/");
+    goto(resolve("/"));
   }
 
   /**
@@ -242,7 +248,7 @@ export class AuthStore {
       const result = await refreshSessionRemote();
 
       if (result.success) {
-        this._expiresAt = result.expiresAt ? new Date(result.expiresAt) : null;
+        this._expiresAt = toDate(result.expiresAt);
         this._expiryWarningShown = false;
 
         // Reload session to get updated user info
@@ -262,63 +268,6 @@ export class AuthStore {
       this._state = "unauthenticated";
       return false;
     }
-  }
-
-  /**
-   * Check if the user has a specific permission
-   * @param permission - Shiro-style permission string (e.g., "api:entries:read")
-   */
-  hasPermission(permission: string): boolean {
-    if (!this._user) return false;
-
-    // Check for admin wildcard
-    if (this._user.permissions.includes("*")) return true;
-
-    // Check for exact match
-    if (this._user.permissions.includes(permission)) return true;
-
-    // Check for wildcard matches (e.g., "api:entries:*" matches "api:entries:read")
-    const parts = permission.split(":");
-    for (const userPerm of this._user.permissions) {
-      const userParts = userPerm.split(":");
-
-      // Skip if user permission is longer than the requested permission
-      if (userParts.length > parts.length) continue;
-
-      let matches = true;
-      for (let i = 0; i < userParts.length; i++) {
-        if (userParts[i] === "*") {
-          // Wildcard matches everything at this level and below
-          return true;
-        }
-        if (userParts[i] !== parts[i]) {
-          matches = false;
-          break;
-        }
-      }
-
-      if (matches && userParts.length === parts.length) return true;
-    }
-
-    return false;
-  }
-
-  /**
-   * Check if the user has a specific role
-   * @param role - Role name (e.g., "admin", "readable")
-   */
-  hasRole(role: string): boolean {
-    if (!this._user) return false;
-    return this._user.roles.includes(role);
-  }
-
-  /**
-   * Check if the user has any of the specified roles
-   * @param roles - Array of role names
-   */
-  hasAnyRole(roles: string[]): boolean {
-    if (!this._user) return false;
-    return roles.some((role) => this._user!.roles.includes(role));
   }
 
   /**
@@ -391,6 +340,8 @@ export class AuthStore {
    * Cleanup when the store is destroyed
    */
   destroy(): void {
+    this.cancelSessionLoad?.();
+    this.cancelSessionLoad = null;
     this.stopExpiryCheck();
     this.closeLoginDialog();
   }

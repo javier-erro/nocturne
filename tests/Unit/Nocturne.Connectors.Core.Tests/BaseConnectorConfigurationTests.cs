@@ -192,6 +192,18 @@ public class ConditionalRequiredPropertyTests
 
 internal class TestConnectorConfiguration : BaseConnectorConfiguration
 {
+    [ConnectorProperty(ConnectorPropertyKey.SyncSteps)]
+    public bool SyncSteps { get; set; } = true;
+
+    [ConnectorProperty(ConnectorPropertyKey.SyncHeartRate)]
+    public bool SyncHeartRate { get; set; } = true;
+
+    [ConnectorProperty(ConnectorPropertyKey.SyncBodyWeight)]
+    public bool SyncBodyWeight { get; set; } = true;
+
+    [ConnectorProperty(ConnectorPropertyKey.SyncSleep)]
+    public bool SyncSleep { get; set; } = true;
+
     protected override void ValidateSourceSpecificConfiguration()
     {
         // No additional validation for test implementation

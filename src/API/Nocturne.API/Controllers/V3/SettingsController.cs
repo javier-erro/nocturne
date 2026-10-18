@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Nocturne.API.Attributes;
+using Nocturne.API.Configuration;
 using Nocturne.API.Authorization;
 using Nocturne.Core.Models.Authorization;
 using Nocturne.Core.Contracts.Legacy;
@@ -302,12 +303,12 @@ public class SettingsController : BaseV3Controller<Settings>
     /// </summary>
     /// <param name="id">Settings ID to delete</param>
     /// <param name="cancellationToken">Cancellation token</param>
-    /// <returns>No content on success</returns>
+    /// <returns><c>{"status": 200}</c> on success</returns>
     [HttpDelete("{id}")]
     [Authorize]
     [RequireScope(Scope.TherapyReadWrite)]
     [NightscoutEndpoint("/api/v3/settings/{id}")]
-    [ProducesResponseType(204)]
+    [ProducesResponseType(200)]
     [ProducesResponseType(typeof(V3ErrorResponse), 404)]
     [ProducesResponseType(typeof(V3ErrorResponse), 403)]
     [ProducesResponseType(500)]
@@ -338,7 +339,7 @@ public class SettingsController : BaseV3Controller<Settings>
 
         _logger.LogDebug("Successfully deleted settings with ID {Id}", id);
 
-        return NoContent();
+        return CreateV3DeleteResponse();
     }
 
     /// <summary>
@@ -348,43 +349,15 @@ public class SettingsController : BaseV3Controller<Settings>
     /// <returns>Collection of Settings objects</returns>
     private IEnumerable<Settings> ParseCreateRequestFromJsonElement(JsonElement jsonElement)
     {
-        var settingsRecords = new List<Settings>();
-
         try
         {
-            if (jsonElement.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var element in jsonElement.EnumerateArray())
-                {
-                    var settings = JsonSerializer.Deserialize<Settings>(
-                        element.GetRawText(),
-                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true }
-                    );
-                    if (settings != null)
-                    {
-                        settingsRecords.Add(settings);
-                    }
-                }
-            }
-            else if (jsonElement.ValueKind == JsonValueKind.Object)
-            {
-                var settings = JsonSerializer.Deserialize<Settings>(
-                    jsonElement.GetRawText(),
-                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true }
-                );
-                if (settings != null)
-                {
-                    settingsRecords.Add(settings);
-                }
-            }
+            return NightscoutJsonBody.ReadObjects<Settings>(jsonElement) ?? [];
         }
         catch (JsonException ex)
         {
             _logger.LogWarning(ex, "Failed to parse settings data from JsonElement");
             throw new ArgumentException("Invalid settings data format", ex);
         }
-
-        return settingsRecords;
     }
 
     /// <summary>

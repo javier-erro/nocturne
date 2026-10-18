@@ -1,22 +1,24 @@
 <script lang="ts">
+  import { lazyComponent } from "$lib/utils/lazy-component.svelte";
   import * as Popover from "$lib/components/ui/popover";
   import { Button } from "$lib/components/ui/button";
-  import { Bell, ChevronRight } from "lucide-svelte";
+  import Bell from "@lucide/svelte/icons/bell";
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
   import { cn } from "$lib/utils";
   import { tryGetRealtimeStore } from "$lib/stores/realtime-store.svelte";
   import { goto } from "$app/navigation";
+  import { resolve } from "$app/paths";
   import {
     executeAction,
     markAsRead,
     markAllAsRead,
   } from "$api/generated/notifications.generated.remote";
-  import { CheckCheck } from "lucide-svelte";
+  import CheckCheck from "@lucide/svelte/icons/check-check";
   import {
     NotificationUrgency,
     type InAppNotificationDto,
   } from "$lib/api/generated/nocturne-api-client";
   import NotificationItem from "./NotificationItem.svelte";
-  import { MealMatchReviewDialog } from "$lib/components/meal-matching";
   import DndPanel from "$lib/components/alerts/DndPanel.svelte";
 
   // Get the realtime store for reactive notification data
@@ -24,7 +26,9 @@
 
   // State
   let isOpen = $state(false);
-  let reviewDialogOpen = $state(false);
+  const mealMatchReviewDialog = lazyComponent(
+    () => import("$lib/components/meal-matching/MealMatchReviewDialog.svelte"),
+  );
   let reviewNotification = $state<InAppNotificationDto | null>(null);
 
   // Sort notifications by urgency (Urgent > Hazard > Warn > Info), then by timestamp
@@ -80,7 +84,7 @@
       actionId === "review"
     ) {
       reviewNotification = notification;
-      reviewDialogOpen = true;
+      mealMatchReviewDialog.open = true;
       return;
     }
 
@@ -97,7 +101,7 @@
           console.error("Failed to mark notification read:", err)
         );
       }
-      goto("/reports/data-quality/compression-lows");
+      goto(resolve("/reports/data-quality/compression-lows"));
       return;
     }
 
@@ -114,7 +118,7 @@
           console.error("Failed to mark notification read:", err)
         );
       }
-      goto(`/settings/connectors/${notification.sourceId}`);
+      goto(resolve("/(authenticated)/settings/connectors/[connector]", { connector: notification.sourceId }));
       return;
     }
 
@@ -149,18 +153,18 @@
         <Button
           {...props}
           variant="ghost"
-          size="icon"
-          class="relative h-8 w-8"
+          size="icon-sm"
+          class="relative"
           aria-label="Notifications"
         >
           <Bell class="h-4 w-4" />
           {#if unreadCount > 0}
             <span
               class={cn(
-                "absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-medium",
-                badgeVariant === "destructive" && "bg-red-500 text-white",
-                badgeVariant === "warning" && "bg-orange-500 text-white",
-                badgeVariant === "secondary" && "bg-yellow-500 text-black"
+                "absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-2xs font-medium",
+                badgeVariant === "destructive" && "bg-severity-urgent text-severity-urgent-foreground",
+                badgeVariant === "warning" && "bg-severity-hazard text-severity-hazard-foreground",
+                badgeVariant === "secondary" && "bg-severity-warn text-severity-warn-foreground"
               )}
             >
               {unreadCount}
@@ -175,10 +179,9 @@
         <div class="flex items-center gap-3">
           {#if unreadCount > 0}
             <Button
-              variant="ghost"
-              size="sm"
+              variant="ghost-muted"
+              size="xs"
               onclick={handleMarkAllRead}
-              class="h-auto gap-1 px-2 py-1 text-xs text-muted-foreground"
             >
               <CheckCheck class="h-3.5 w-3.5" />
               Mark all read
@@ -186,7 +189,7 @@
           {/if}
           {#if sortedNotifications.length > 0}
             <a
-              href="/settings/trackers"
+              href={resolve("/settings/trackers")}
               class="text-xs text-muted-foreground hover:underline"
             >
               Manage
@@ -202,7 +205,7 @@
           <Bell class="h-8 w-8 text-muted-foreground/50 mb-2" />
           <p class="text-sm text-muted-foreground">No active notifications</p>
           <a
-            href="/settings/trackers"
+            href={resolve("/settings/trackers")}
             class="mt-2 text-xs text-primary hover:underline"
           >
             Set up trackers
@@ -221,7 +224,7 @@
 
       <div class="border-t p-2">
         <a
-          href="/notifications"
+          href={resolve("/notifications")}
           class="flex items-center justify-between rounded-md px-2 py-1.5 text-sm hover:bg-muted"
           onclick={() => (isOpen = false)}
         >
@@ -232,21 +235,23 @@
     </Popover.Content>
   </Popover.Root>
 
-  <MealMatchReviewDialog
-    bind:open={reviewDialogOpen}
-    onOpenChange={(value) => {
-      reviewDialogOpen = value;
-      if (!value) reviewNotification = null;
-    }}
-    notification={reviewNotification}
-    onComplete={handleReviewComplete}
-  />
+  {#if mealMatchReviewDialog.component}
+    <mealMatchReviewDialog.component
+      bind:open={mealMatchReviewDialog.open}
+      onOpenChange={(value) => {
+        mealMatchReviewDialog.open = value;
+        if (!value) reviewNotification = null;
+      }}
+      notification={reviewNotification}
+      onComplete={handleReviewComplete}
+    />
+  {/if}
 
   {#snippet failed()}
     <Button
       variant="ghost"
-      size="icon"
-      class="relative h-8 w-8"
+      size="icon-sm"
+      class="relative"
       aria-label="Notifications unavailable"
       disabled
     >

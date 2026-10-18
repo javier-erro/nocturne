@@ -10,34 +10,34 @@
   import { foldStoredSpans } from "$lib/api/generated/stateSpanMaintenances.generated.remote";
   import type { StateSpanFoldResult } from "$lib/api/generated/nocturne-api-client";
   import { describeSubmitError } from "$lib/forms/submit-error";
-  import Layers from "lucide-svelte/icons/layers";
-  import {
-    Link2,
-    Loader2,
-    RefreshCw,
-    Sparkles,
-    Wrench,
-    ChevronRight,
-  } from "lucide-svelte";
+  import Layers from "@lucide/svelte/icons/layers";
+  import Link2 from "@lucide/svelte/icons/link-2";
+  import Loader2 from "@lucide/svelte/icons/loader-circle";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import Sparkles from "@lucide/svelte/icons/sparkles";
+  import Wrench from "@lucide/svelte/icons/wrench";
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
   import DeduplicationDialog from "$lib/components/connectors/DeduplicationDialog.svelte";
   import DemoDataSection from "$lib/components/connectors/DemoDataSection.svelte";
   import { resolve } from "$app/paths";
   import { page } from "$app/state";
+  import { satisfiesScope } from "$lib/authorization/scopes";
+  import { canManageConnectors } from "$lib/authorization/connector-management";
 
   const isPlatformAdmin = $derived(
-    (page.data as { isPlatformAdmin?: boolean }).isPlatformAdmin ?? false
+    page.data.isPlatformAdmin === true
   );
 
-  // Both tools rewrite tenant-wide data and the API answers 403 to anyone but an admin, so the
-  // card self-gates on the same permissions RequireAdmin resolves to. It matters more here than
-  // it did on Connectors & Apps: Data Quality is a page an ordinary member opens to set a sleep
-  // schedule, so offering them a Remove Demo Data button that only fails would be its own answer.
-  const effectivePermissions: string[] = $derived(
-    (page.data as { effectivePermissions?: string[] }).effectivePermissions ??
-      []
+  // The two tools answer to different gates: deduplication is RequireAdmin, so it resolves to
+  // the wildcard; deleting demo data is tenant.settings and refuses the demo visitor. Data
+  // Quality is a page an ordinary member opens to set a sleep schedule, so neither control is
+  // offered to someone the API would refuse.
+  const effectivePermissions = $derived(
+    page.data.effectivePermissions ?? []
   );
-  const canMaintainData = $derived(
-    effectivePermissions.includes("*") || effectivePermissions.includes("admin")
+  const canDeduplicate = $derived(satisfiesScope(effectivePermissions, "*"));
+  const canManageData = $derived(
+    canManageConnectors(effectivePermissions, page.data.refusedAsDemoSubject)
   );
 
   let showDeduplicationDialog = $state(false);
@@ -65,7 +65,7 @@
   let showDemoDataDialog = $state(false);
 </script>
 
-{#if canMaintainData}
+{#if canDeduplicate || canManageData}
   <Card>
     <CardHeader>
       <CardTitle class="flex items-center gap-2">
@@ -77,104 +77,110 @@
       </CardDescription>
     </CardHeader>
     <CardContent class="space-y-4">
-      <div
-        data-testid="deduplicate-records"
-        class="flex items-start gap-4 p-4 rounded-lg border bg-card"
-      >
+      {#if canDeduplicate}
         <div
-          class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10"
+          data-testid="deduplicate-records"
+          class="flex items-start gap-4 p-4 rounded-lg border bg-card"
         >
-          <Link2 class="h-5 w-5 text-primary" />
-        </div>
-        <div class="flex-1">
-          <h4 class="font-medium">Deduplicate Records</h4>
-          <p class="text-sm text-muted-foreground mt-1">
-            Link records from multiple data sources that represent the same
-            underlying event. This improves data quality when the same glucose
-            readings or treatments are uploaded from different apps.
-          </p>
-          <Button
-            variant="outline"
-            size="sm"
-            class="mt-3 gap-2"
-            onclick={() => (showDeduplicationDialog = true)}
+          <div
+            class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10"
           >
-            {#if isDeduplicating}
-              <Loader2 class="h-4 w-4 animate-spin" />
-              Deduplication Running...
-            {:else}
-              <Link2 class="h-4 w-4" />
-              Run Deduplication
-            {/if}
-          </Button>
-        </div>
-      </div>
-
-      <div
-        data-testid="fold-state-spans"
-        class="flex items-start gap-4 p-4 rounded-lg border bg-card"
-      >
-        <div
-          class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10"
-        >
-          <Layers class="h-5 w-5 text-primary" />
-        </div>
-        <div class="flex-1">
-          <h4 class="font-medium">Fold Contiguous Pump Modes</h4>
-          <p class="text-sm text-muted-foreground mt-1">
-            Merge pump-mode and connectivity spans that touch or sit within a minute of each
-            other into one span per continuous state. New imports are folded as they arrive; this
-            applies the same rule to spans already stored.
-          </p>
-          <Button
-            variant="outline"
-            size="sm"
-            class="mt-3 gap-2"
-            onclick={handleFoldSpans}
-            disabled={isFolding}
-          >
-            {#if isFolding}
-              <Loader2 class="h-4 w-4 animate-spin" />
-              Folding...
-            {:else}
-              <Layers class="h-4 w-4" />
-              Fold Spans
-            {/if}
-          </Button>
-          {#if foldResult}
-            <p class="text-sm text-muted-foreground mt-2">
-              {foldResult.examined} spans examined, {foldResult.widened} merges, {foldResult.removed} spans absorbed.
+            <Link2 class="h-5 w-5 text-primary" />
+          </div>
+          <div class="flex-1">
+            <h4 class="font-medium">Deduplicate Records</h4>
+            <p class="text-sm text-muted-foreground mt-1">
+              Link records from multiple data sources that represent the same
+              underlying event. This improves data quality when the same glucose
+              readings or treatments are uploaded from different apps.
             </p>
-          {/if}
-          {#if foldError}
-            <p class="text-sm text-destructive mt-2">{foldError}</p>
-          {/if}
+            <Button
+              variant="outline"
+              size="sm"
+              class="mt-3"
+              onclick={() => (showDeduplicationDialog = true)}
+            >
+              {#if isDeduplicating}
+                <Loader2 class="h-4 w-4 animate-spin" />
+                Deduplication Running...
+              {:else}
+                <Link2 class="h-4 w-4" />
+                Run Deduplication
+              {/if}
+            </Button>
+          </div>
         </div>
-      </div>
+      {/if}
 
-      <div class="flex items-start gap-4 p-4 rounded-lg border bg-card">
+      {#if canDeduplicate}
         <div
-          class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10"
+          data-testid="fold-state-spans"
+          class="flex items-start gap-4 p-4 rounded-lg border bg-card"
         >
-          <Sparkles class="h-5 w-5 text-primary" />
-        </div>
-        <div class="flex-1">
-          <h4 class="font-medium">Remove Demo Data</h4>
-          <p class="text-sm text-muted-foreground mt-1">
-            Delete the sample readings and treatments that were generated to
-            show you around. Your own data is not affected.
-          </p>
-          <Button
-            variant="outline"
-            size="sm"
-            class="mt-3 gap-2"
-            onclick={() => (showDemoDataDialog = true)}
+          <div
+            class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10"
           >
-            <Sparkles class="h-4 w-4" />
-            Remove Demo Data
-          </Button>
+            <Layers class="h-5 w-5 text-primary" />
+          </div>
+          <div class="flex-1">
+            <h4 class="font-medium">Fold Contiguous Pump Modes</h4>
+            <p class="text-sm text-muted-foreground mt-1">
+              Merge pump-mode and connectivity spans that touch or sit within a minute of each
+              other into one span per continuous state. New imports are folded as they arrive; this
+              applies the same rule to spans already stored.
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              class="mt-3"
+              onclick={handleFoldSpans}
+              disabled={isFolding}
+            >
+              {#if isFolding}
+                <Loader2 class="h-4 w-4 animate-spin" />
+                Folding...
+              {:else}
+                <Layers class="h-4 w-4" />
+                Fold Spans
+              {/if}
+            </Button>
+            {#if foldResult}
+              <p class="text-sm text-muted-foreground mt-2">
+                {foldResult.examined} spans examined, {foldResult.widened} merges, {foldResult.removed} spans absorbed.
+              </p>
+            {/if}
+            {#if foldError}
+              <p class="text-sm text-destructive mt-2">{foldError}</p>
+            {/if}
+          </div>
         </div>
-      </div>
+      {/if}
+
+      {#if canManageData}
+        <div class="flex items-start gap-4 p-4 rounded-lg border bg-card">
+          <div
+            class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10"
+          >
+            <Sparkles class="h-5 w-5 text-primary" />
+          </div>
+          <div class="flex-1">
+            <h4 class="font-medium">Remove Demo Data</h4>
+            <p class="text-sm text-muted-foreground mt-1">
+              Delete the sample readings and treatments that were generated to
+              show you around. Your own data is not affected.
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              class="mt-3"
+              onclick={() => (showDemoDataDialog = true)}
+            >
+              <Sparkles class="h-4 w-4" />
+              Remove Demo Data
+            </Button>
+          </div>
+        </div>
+      {/if}
 
       {#if isPlatformAdmin}
         <a

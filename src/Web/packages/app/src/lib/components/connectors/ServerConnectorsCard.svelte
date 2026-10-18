@@ -11,6 +11,7 @@
     AvailableConnector,
     ConnectorCapabilities,
     DataSourceInfo,
+    GoogleHealthStatus,
   } from "$lib/api/generated/nocturne-api-client";
   import {
     Card,
@@ -21,19 +22,22 @@
   } from "$lib/components/ui/card";
   import { Button } from "$lib/components/ui/button";
   import { Badge } from "$lib/components/ui/badge";
-  import {
-    Cloud,
-    RefreshCw,
-    Loader2,
-    Download,
-    Database,
-    ExternalLink,
-    ChevronRight,
-  } from "lucide-svelte";
+  import Cloud from "@lucide/svelte/icons/cloud";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import Loader2 from "@lucide/svelte/icons/loader-circle";
+  import Download from "@lucide/svelte/icons/download";
+  import Database from "@lucide/svelte/icons/database";
+  import ExternalLink from "@lucide/svelte/icons/external-link";
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import HeartPulse from "@lucide/svelte/icons/heart-pulse";
   import DataSourceRow from "$lib/components/settings/DataSourceRow.svelte";
+  import GoogleHealthSourceRow from "./GoogleHealthSourceRow.svelte";
   import AppLogo from "$lib/components/ui/AppLogo.svelte";
+  import { canManageConnectors } from "$lib/authorization/connector-management";
   import { mapConnectorStatus } from "$lib/utils/connector-display";
+  import { page } from "$app/state";
   import type { SyncProgressEvent } from "$lib/websocket/types";
+  import { resolve } from "$app/paths";
 
   interface Props {
     availableConnectors: AvailableConnector[];
@@ -47,7 +51,13 @@
     onRefreshStatuses: () => void;
     onManualSync: () => void;
     onQuickSync: (connectorId: string) => void;
-    onConnectorClick: (connector: ConnectorStatusWithDescription, connectorId?: string) => void;
+    onConnectorClick: (
+      connector: ConnectorStatusWithDescription,
+      connectorId?: string
+    ) => void;
+    googleHealth: GoogleHealthStatus | null;
+    googleHealthLoading: boolean;
+    googleHealthFailed: boolean;
   }
 
   let {
@@ -63,9 +73,24 @@
     onManualSync,
     onQuickSync,
     onConnectorClick,
+    googleHealth,
+    googleHealthLoading,
+    googleHealthFailed,
   }: Props = $props();
 
-  function getConnectorDataSource(connector: AvailableConnector): DataSourceInfo | null {
+  const canManage = $derived(
+    canManageConnectors(
+      page.data.effectivePermissions,
+      page.data.refusedAsDemoSubject
+    )
+  );
+  const visibleConnectors = $derived(
+    availableConnectors.filter((connector) => connector.id !== "googlehealth" || canManage)
+  );
+
+  function getConnectorDataSource(
+    connector: AvailableConnector
+  ): DataSourceInfo | null {
     if (!activeDataSources) return null;
     if (!connector.dataSourceId && !connector.id) return null;
     return (
@@ -91,7 +116,9 @@
 
 <Card class="@container">
   <CardHeader>
-    <div class="flex flex-col gap-3 @lg:flex-row @lg:items-center @lg:justify-between">
+    <div
+      class="flex flex-col gap-3 @lg:flex-row @lg:items-center @lg:justify-between"
+    >
       <div>
         <CardTitle class="flex items-center gap-2">
           <Cloud class="h-5 w-5" />
@@ -102,56 +129,91 @@
         </CardDescription>
       </div>
       <div class="flex gap-2">
-        {#if connectorStatuses.length > 0}
+        {#if connectorStatuses.length > 0 || googleHealth?.configured || googleHealth?.connected || googleHealthLoading || googleHealthFailed}
           <Button
             variant="outline"
             size="sm"
             onclick={onRefreshStatuses}
             disabled={isLoadingConnectorStatuses}
-            class="gap-2"
           >
             <RefreshCw
-              class="h-4 w-4 {isLoadingConnectorStatuses
-                ? 'animate-spin'
-                : ''}"
+              class="h-4 w-4 {isLoadingConnectorStatuses ? 'animate-spin' : ''}"
             />
             Refresh
           </Button>
         {/if}
-        <Button
-          variant="outline"
-          size="sm"
-          onclick={onManualSync}
-          disabled={isManualSyncing}
-          class="gap-2"
-        >
-          {#if isManualSyncing}
-            <Loader2 class="h-4 w-4 animate-spin" />
-            Syncing...
-          {:else}
-            <Download class="h-4 w-4" />
-            Manual Sync
-          {/if}
-        </Button>
+        {#if canManage}
+          <Button
+            variant="outline"
+            size="sm"
+            onclick={onManualSync}
+            disabled={isManualSyncing}
+          >
+            {#if isManualSyncing}
+              <Loader2 class="h-4 w-4 animate-spin" />
+              Syncing...
+            {:else}
+              <Download class="h-4 w-4" />
+              Manual Sync
+            {/if}
+          </Button>
+        {/if}
       </div>
     </div>
   </CardHeader>
   <CardContent>
     <div class="grid gap-3 @xl:grid-cols-2">
-      {#each availableConnectors as connector}
+      {#each visibleConnectors as connector (connector.id)}
+        {#if connector.id === "googlehealth"}
+          {#if googleHealth && !googleHealthLoading && !googleHealthFailed && (googleHealth.connected || googleHealth.configured)}
+            <GoogleHealthSourceRow connection={googleHealth} />
+          {:else}
+            <a
+              href={resolve("/settings/connectors/google-health")}
+              class="group relative flex items-center gap-4 rounded-lg border bg-muted/30 p-4 transition-colors hover:border-primary/50 hover:bg-accent/50"
+            >
+              <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+                <HeartPulse class="h-5 w-5 text-primary" />
+              </div>
+              <div class="min-w-0 flex-1">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="font-medium">Google Health</span>
+                  <Badge variant="outline">
+                    {#if googleHealthFailed}
+                      Status unavailable
+                    {:else if googleHealthLoading}
+                      Loading...
+                    {:else}
+                      Not Configured
+                    {/if}
+                  </Badge>
+                </div>
+                <p class="text-sm text-muted-foreground">
+                  Import steps, heart rate, weight, and sleep from Google Health
+                </p>
+              </div>
+              <ChevronRight class="h-4 w-4 text-muted-foreground group-hover:text-foreground" />
+            </a>
+          {/if}
+        {:else}
         {@const connectorStatusInfo = connectorStatuses.find(
           (cs) => cs.id === connector.id
         )}
-        {@const isConnected = connectorStatusInfo?.isEnabled === true && connectorStatusInfo?.hasDatabaseConfig === true}
-        {@const isDisabled = connectorStatusInfo?.isEnabled === false && connectorStatusInfo?.hasDatabaseConfig === true}
+        {@const isConnected =
+          connectorStatusInfo?.isEnabled === true &&
+          connectorStatusInfo?.hasDatabaseConfig === true}
+        {@const isDisabled =
+          connectorStatusInfo?.isEnabled === false &&
+          connectorStatusInfo?.hasDatabaseConfig === true}
         {@const connectorDataSource = getConnectorDataSource(connector)}
-        {@const hasData = connectorDataSource !== null || (isDisabled && (connectorStatusInfo?.totalEntries ?? 0) > 0)}
+        {@const hasData =
+          connectorDataSource !== null ||
+          (isDisabled && (connectorStatusInfo?.totalEntries ?? 0) > 0)}
         {@const connectorCapabilities = connector.id
           ? connectorCapabilitiesById[connector.id]
           : null}
         {@const canQuickSync =
-          isConnected &&
-          (connectorCapabilities?.supportsManualSync ?? true)}
+          isConnected && (connectorCapabilities?.supportsManualSync ?? true)}
 
         {#if isConnected && connectorStatusInfo}
           <!-- Connected connector -->
@@ -164,7 +226,10 @@
           <DataSourceRow
             name={connector.name ?? connector.id ?? "Unknown"}
             icon={connector.icon}
-            status={syncProgressByConnector[connector.id ?? ""]?.phase === "Syncing" ? "syncing" : mapConnectorStatus(connectorStatus)}
+            status={syncProgressByConnector[connector.id ?? ""]?.phase ===
+            "Syncing"
+              ? "syncing"
+              : mapConnectorStatus(connectorStatus)}
             syncProgress={syncProgressByConnector[connector.id ?? ""] ?? null}
             totalEntries={connectorStatus.totalEntries}
             entriesLast24h={connectorStatus.entriesLast24Hours}
@@ -172,11 +237,12 @@
             lastSyncAttempt={connectorStatus.lastSyncAttempt}
             lastSuccessfulSync={connectorStatus.lastSuccessfulSync}
             totalBreakdown={connectorStatus.totalItemsBreakdown ?? undefined}
-            last24hBreakdown={connectorStatus.itemsLast24HoursBreakdown ?? undefined}
+            last24hBreakdown={connectorStatus.itemsLast24HoursBreakdown ??
+              undefined}
             onclick={() => onConnectorClick(connectorStatus, connector.id)}
           >
             {#snippet actions()}
-              {#if connector.id && canQuickSync}
+              {#if canManage && connector.id && canQuickSync}
                 <Button
                   variant="outline"
                   size="icon"
@@ -213,6 +279,7 @@
             status={isDisabled ? "disabled" : "offline"}
             syncProgress={syncProgressByConnector[connector.id ?? ""] ?? null}
             totalEntries={entryCount}
+            totalCoversLast30Days
             entriesLast24h={entries24h}
             lastSeen={lastSeenDate}
             onclick={() => {
@@ -224,7 +291,9 @@
                 totalEntries: dataSource?.totalEntries ?? 0,
                 lastEntryTime: dataSource?.lastSeen,
                 entriesLast24Hours: dataSource?.entriesLast24h ?? 0,
-                state: connectorStatusInfo?.state ?? (isDisabled ? "Disabled" : "Offline"),
+                state:
+                  connectorStatusInfo?.state ??
+                  (isDisabled ? "Disabled" : "Offline"),
                 isHealthy: false,
                 isEnabled: connectorStatusInfo?.isEnabled,
                 hasDatabaseConfig: connectorStatusInfo?.hasDatabaseConfig,
@@ -235,10 +304,7 @@
           >
             {#snippet badges()}
               {#if hasData}
-                <Badge
-                  variant="secondary"
-                  class="bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-100 text-xs"
-                >
+                <Badge variant="info">
                   <Database class="h-3 w-3 mr-1" />
                   Has Data
                 </Badge>
@@ -261,14 +327,12 @@
             <div class="flex-1 min-w-0">
               <div class="flex items-center gap-2 flex-wrap">
                 <a
-                  href="/settings/connectors/{connector.id?.toLowerCase()}"
+                  href={resolve(`/settings/connectors/${connector.id?.toLowerCase()}`)}
                   class="font-medium before:absolute before:inset-0 before:content-[''] hover:underline"
                 >
                   {connector.name}
                 </a>
-                <Badge variant="outline" class="text-xs">
-                  Not Configured
-                </Badge>
+                <Badge variant="outline">Not Configured</Badge>
               </div>
               <p class="text-sm text-muted-foreground">
                 {connector.description}
@@ -293,11 +357,12 @@
             </div>
           </div>
         {/if}
+        {/if}
       {/each}
     </div>
     <p class="text-sm text-muted-foreground mt-4">
-      Click on a connector to configure credentials and settings. Changes
-      take effect immediately.
+      Click on a connector to configure credentials and settings. Changes take
+      effect immediately.
     </p>
   </CardContent>
 </Card>

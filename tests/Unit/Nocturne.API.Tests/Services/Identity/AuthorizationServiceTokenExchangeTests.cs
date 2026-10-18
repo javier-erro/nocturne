@@ -1,5 +1,7 @@
+using System.Data.Common;
 using Nocturne.Connectors.Core.Utilities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Moq;
@@ -28,7 +30,9 @@ public class AuthorizationServiceTokenExchangeTests : IDisposable
     private readonly Mock<IJwtService> _mockJwtService;
     private readonly SqliteTestDatabase _db;
     private readonly NocturneDbContext _dbContext;
+    private readonly Nocturne.Infrastructure.Data.Services.CategoryReadContext _categoryReadContext = new();
     private readonly AuthorizationService _authorizationService;
+    private readonly List<NocturneDbContext> _extraContexts = [];
 
     private readonly Guid _testTenantId = Guid.CreateVersion7();
     private readonly Guid _subjectId = Guid.CreateVersion7();
@@ -63,12 +67,14 @@ public class AuthorizationServiceTokenExchangeTests : IDisposable
             new Mock<IRoleService>().Object,
             new Mock<IDirectGrantService>().Object,
             _mockJwtService.Object,
-            _dbContext
+            _dbContext,
+            _categoryReadContext
         );
     }
 
     public void Dispose()
     {
+        _extraContexts.ForEach(c => c.Dispose());
         _dbContext.Dispose();
         _db.Dispose();
     }
@@ -79,7 +85,8 @@ public class AuthorizationServiceTokenExchangeTests : IDisposable
         List<string>? scopes = null,
         DateTime? expiresAt = null,
         Guid? tenantId = null,
-        string? legacyTokenDigest = null)
+        string? legacyTokenDigest = null,
+        bool limitTo24Hours = false)
     {
         _dbContext.OAuthGrants.Add(new OAuthGrantEntity
         {
@@ -93,6 +100,7 @@ public class AuthorizationServiceTokenExchangeTests : IDisposable
             CreatedAt = DateTime.UtcNow,
             RevokedAt = revokedAt,
             ExpiresAt = expiresAt,
+            LimitTo24Hours = limitTo24Hours,
         });
         _dbContext.SaveChanges();
     }
@@ -149,6 +157,32 @@ public class AuthorizationServiceTokenExchangeTests : IDisposable
             It.IsAny<string?>(),
             It.IsAny<bool>(),
             _testTenantId,
+            It.IsAny<TimeSpan?>(),
+            It.IsAny<bool>(),
+            It.IsAny<Guid?>()), Times.Once);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task GenerateJwtFromAccessTokenAsync_NocToken_CarriesTheGrantsHistoryLimit(bool limitTo24Hours)
+    {
+        // A clamped grant traded for a JWT must stay clamped, or the exchange sheds the limit.
+        var token = "noc_followerphone";
+        SeedGrant(token, limitTo24Hours: limitTo24Hours);
+        SetupActiveSubject();
+        SetupMintedJwt();
+
+        await _authorizationService.GenerateJwtFromAccessTokenAsync(token);
+
+        _mockJwtService.Verify(j => j.GenerateAccessToken(
+            It.IsAny<SubjectInfo>(),
+            It.IsAny<IEnumerable<string>>(),
+            It.IsAny<IEnumerable<string>>(),
+            It.IsAny<IEnumerable<string>>(),
+            It.IsAny<string?>(),
+            limitTo24Hours,
+            It.IsAny<Guid?>(),
             It.IsAny<TimeSpan?>(),
             It.IsAny<bool>(),
             It.IsAny<Guid?>()), Times.Once);
@@ -288,5 +322,92 @@ public class AuthorizationServiceTokenExchangeTests : IDisposable
         var result = await _authorizationService.GenerateJwtFromAccessTokenAsync(token);
 
         result.Should().NotBeNull("an unexpired grant is still usable");
+    }
+
+    /// <summary>
+    /// AAPS reads a 401 from the exchange as a revoked token and stops retrying, so a database that
+    /// cannot answer must not look like a grant that does not exist.
+    /// </summary>
+    [Fact]
+    public async Task A_grant_lookup_that_fails_throws_rather_than_reading_as_an_invalid_token()
+    {
+        var service = ServiceOver(new FailingQueryInterceptor());
+
+        var exchange = () => service.GenerateJwtFromAccessTokenAsync("noc_uploadertoken123");
+
+        await exchange.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage(FailingQueryInterceptor.Message);
+    }
+
+    [Fact]
+    public async Task A_last_used_stamp_that_fails_still_mints_the_jwt()
+    {
+        const string token = "noc_uploadertoken123";
+        SeedGrant(token);
+        SetupActiveSubject();
+        SetupMintedJwt();
+        var service = ServiceOver(new FailingUpdateInterceptor());
+
+        var result = await service.GenerateJwtFromAccessTokenAsync(token);
+
+        result.Should().NotBeNull();
+        result!.Token.Should().Be("minted.jwt.token");
+    }
+
+    [Fact]
+    public async Task A_subject_lookup_that_fails_throws_rather_than_reading_as_an_invalid_token()
+    {
+        const string token = "noc_uploadertoken123";
+        SeedGrant(token);
+        _mockSubjectService
+            .Setup(s => s.GetSubjectByIdAsync(_subjectId))
+            .ThrowsAsync(new InvalidOperationException("subject store unavailable"));
+
+        var exchange = () => _authorizationService.GenerateJwtFromAccessTokenAsync(token);
+
+        await exchange.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("subject store unavailable");
+    }
+
+    private AuthorizationService ServiceOver(DbCommandInterceptor interceptor)
+    {
+        var options = new DbContextOptionsBuilder<NocturneDbContext>(_db.Options)
+            .AddInterceptors(interceptor)
+            .Options;
+        var context = new NocturneDbContext(options) { TenantId = _testTenantId };
+        _extraContexts.Add(context);
+
+        return new AuthorizationService(
+            new Mock<IConfiguration>().Object,
+            Mock.Of<ILogger<AuthorizationService>>(),
+            _mockSubjectService.Object,
+            new Mock<IRoleService>().Object,
+            new Mock<IDirectGrantService>().Object,
+            _mockJwtService.Object,
+            context,
+            _categoryReadContext
+        );
+    }
+
+    private sealed class FailingUpdateInterceptor : DbCommandInterceptor
+    {
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("database unavailable");
+    }
+
+    private sealed class FailingQueryInterceptor : DbCommandInterceptor
+    {
+        public const string Message = "database unavailable";
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException(Message);
     }
 }

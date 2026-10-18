@@ -106,6 +106,35 @@ public sealed class FindQuery
     }
 
     /// <summary>
+    /// <c>true</c> when the query's top level (outside any <c>$and</c>/<c>$or</c> group) carries a
+    /// condition on <paramref name="field"/> or one of its sub-paths — the same test as legacy
+    /// Nightscout's truthiness check on <c>query[field]</c>. Field names are case-sensitive, as in
+    /// MongoDB.
+    /// </summary>
+    public bool HasTopLevelCondition(string field)
+    {
+        return EnumerateTopLevel(_root).Any(c =>
+            c.Path.Equals(field, StringComparison.Ordinal)
+            || c.Path.StartsWith(field + ".", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Conditions outside every logical group. A JSON field operand object
+    /// (<c>{"created_at":{"$gte":…}}</c>) parses to a non-logical group and is descended into.
+    /// </summary>
+    private static IEnumerable<Condition> EnumerateTopLevel(Group group)
+    {
+        foreach (var child in group.Children)
+        {
+            if (child is Condition cond)
+                yield return cond;
+            else if (child is Group { IsLogical: false } nested)
+                foreach (var inner in EnumerateTopLevel(nested))
+                    yield return inner;
+        }
+    }
+
+    /// <summary>
     /// Parses a find query from either wire form. A null/empty/unparseable input yields
     /// <see cref="Empty"/> (no filtering), matching the legacy server's lenient behavior.
     /// </summary>
@@ -162,9 +191,21 @@ public sealed class FindQuery
         return EvaluateGroup(_root, document);
     }
 
+    /// <summary>
+    /// Like <see cref="Matches{T}(T)"/> but without the conditions already captured as
+    /// <see cref="FromMills"/>/<see cref="ToMills"/>, for callers whose source applied those bounds
+    /// to a time the document's own timestamp fields do not carry.
+    /// </summary>
+    public bool MatchesResidual<T>(T document)
+    {
+        return EvaluateGroup(
+            _root, JsonSerializer.SerializeToElement(document, WireOptions),
+            skipCapturedBounds: true, andReachable: true);
+    }
+
     #region Condition tree
 
-    private sealed record Group(bool IsAnd, List<object> Children);
+    private sealed record Group(bool IsAnd, List<object> Children, bool IsLogical = false);
 
     /// <summary>
     /// A single field condition. <see cref="StringValue"/> carries the querystring-form operand;
@@ -187,7 +228,8 @@ public sealed class FindQuery
         // field-filtered delete into a whole-window sweep.
         var entries = new List<(string GroupKey, string Field, string Op, string Value)>();
         var findKeys = parsed.AllKeys
-            .Where(k => k is not null && k.StartsWith("find[", StringComparison.OrdinalIgnoreCase));
+            .OfType<string>()
+            .Where(k => k.StartsWith("find[", StringComparison.OrdinalIgnoreCase));
         foreach (var key in findKeys)
         {
             var values = parsed.GetValues(key);
@@ -230,7 +272,7 @@ public sealed class FindQuery
             {
                 if (!clauses.TryGetValue(groupKey, out var clause))
                 {
-                    clause = new Group(IsAnd: true, []);
+                    clause = new Group(IsAnd: true, [], IsLogical: true);
                     clauses[groupKey] = clause;
                     if (groupKey.StartsWith("or:", StringComparison.Ordinal))
                     {
@@ -256,7 +298,7 @@ public sealed class FindQuery
 
     private static Group AddChildGroup(Group parent, bool isAnd)
     {
-        var child = new Group(isAnd, []);
+        var child = new Group(isAnd, [], IsLogical: true);
         parent.Children.Add(child);
         return child;
     }
@@ -330,7 +372,7 @@ public sealed class FindQuery
                 case "$or":
                     if (property.Value.ValueKind == JsonValueKind.Array)
                     {
-                        var logical = new Group(IsAnd: property.Name == "$and", []);
+                        var logical = new Group(IsAnd: property.Name == "$and", [], IsLogical: true);
                         foreach (var item in property.Value.EnumerateArray()
                                      .Where(i => i.ValueKind == JsonValueKind.Object))
                             logical.Children.Add(ParseJsonObject(item, path: null, depth + 1));
@@ -477,10 +519,7 @@ public sealed class FindQuery
             switch (child)
             {
                 case Condition cond:
-                    var isCapturedTimeBound = andReachable
-                        && TimeFields.Contains(cond.Path)
-                        && cond.Op is "$eq" or "$gt" or "$gte" or "$lt" or "$lte"
-                        && TryConvertToMills(cond, out _);
+                    var isCapturedTimeBound = IsCapturedTimeBound(cond, andReachable);
                     var isExceptedEquality = exceptField != null
                         && cond.Op == "$eq"
                         && andReachable
@@ -495,6 +534,12 @@ public sealed class FindQuery
         }
         return count;
     }
+
+    private static bool IsCapturedTimeBound(Condition cond, bool andReachable) =>
+        andReachable
+        && TimeFields.Contains(cond.Path)
+        && cond.Op is "$eq" or "$gt" or "$gte" or "$lt" or "$lte"
+        && TryConvertToMills(cond, out _);
 
     private static bool TryConvertToMills(Condition cond, out long mills)
     {
@@ -523,20 +568,24 @@ public sealed class FindQuery
 
     #region Evaluation
 
-    private static bool EvaluateGroup(Group group, JsonElement document)
+    private static bool EvaluateGroup(
+        Group group, JsonElement document, bool skipCapturedBounds = false, bool andReachable = true)
     {
         if (group.Children.Count == 0)
             return true;
 
         return group.IsAnd
-            ? group.Children.All(child => EvaluateChild(child, document))
-            : group.Children.Any(child => EvaluateChild(child, document));
+            ? group.Children.All(child => EvaluateChild(child, document, skipCapturedBounds, andReachable))
+            : group.Children.Any(child => EvaluateChild(child, document, skipCapturedBounds, andReachable));
     }
 
-    private static bool EvaluateChild(object child, JsonElement document) => child switch
+    private static bool EvaluateChild(
+        object child, JsonElement document, bool skipCapturedBounds, bool andReachable) => child switch
     {
-        Condition cond => EvaluateCondition(cond, document),
-        Group nested => EvaluateGroup(nested, document),
+        Condition cond => (skipCapturedBounds && IsCapturedTimeBound(cond, andReachable))
+            || EvaluateCondition(cond, document),
+        Group nested => EvaluateGroup(
+            nested, document, skipCapturedBounds, andReachable && nested.IsAnd),
         _ => true,
     };
 

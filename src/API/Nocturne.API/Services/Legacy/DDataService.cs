@@ -20,6 +20,8 @@ namespace Nocturne.API.Services.Legacy;
 /// <seealso cref="IDDataService"/>
 public class DDataService : IDDataService
 {
+    private const long DeviceStatusWindowMills = 24L * 60 * 60 * 1000;
+
     private readonly IEntryStore _store;
     private readonly ITreatmentService _treatments;
     private readonly IProfileProjectionService _profiles;
@@ -196,10 +198,7 @@ public class DDataService : IDDataService
             .ToList();
         if (preserveOriginalTreatments)
         {
-            profileTreatments =
-                JsonSerializer.Deserialize<List<Treatment>>(
-                    JsonSerializer.Serialize(profileTreatments)
-                ) ?? new();
+            profileTreatments = DeepClone(profileTreatments);
         }
         ddata.ProfileTreatments = ProcessDurations(profileTreatments, true);
 
@@ -209,10 +208,7 @@ public class DDataService : IDDataService
             .ToList();
         if (preserveOriginalTreatments)
         {
-            tempBasalTreatments =
-                JsonSerializer.Deserialize<List<Treatment>>(
-                    JsonSerializer.Serialize(tempBasalTreatments)
-                ) ?? new();
+            tempBasalTreatments = DeepClone(tempBasalTreatments);
         }
         ddata.TempBasalTreatments = ProcessDurations(tempBasalTreatments, false);
 
@@ -224,10 +220,7 @@ public class DDataService : IDDataService
             .ToList();
         if (preserveOriginalTreatments)
         {
-            tempTargetTreatments =
-                JsonSerializer.Deserialize<List<Treatment>>(
-                    JsonSerializer.Serialize(tempTargetTreatments)
-                ) ?? new();
+            tempTargetTreatments = DeepClone(tempTargetTreatments);
         }
         tempTargetTreatments = ConvertTempTargetUnits(tempTargetTreatments);
         ddata.TempTargetTreatments = ProcessDurations(tempTargetTreatments, false);
@@ -363,9 +356,7 @@ public class DDataService : IDDataService
     public List<Treatment> ConvertTempTargetUnits(List<Treatment> treatments)
     {
         // Deep clone to avoid modifying originals
-        var convertedTreatments =
-            JsonSerializer.Deserialize<List<Treatment>>(JsonSerializer.Serialize(treatments))
-            ?? new();
+        var convertedTreatments = DeepClone(treatments);
 
         for (int i = 0; i < convertedTreatments.Count; i++)
         {
@@ -470,9 +461,9 @@ public class DDataService : IDDataService
                     }
                     else if (createdAtValue is string dateString)
                     {
-                        if (DateTime.TryParse(dateString, out var parsedDate))
+                        if (UploaderTimestamp.TryParse(dateString, out var parsedDate))
                         {
-                            millsToSet = ((DateTimeOffset)parsedDate).ToUnixTimeMilliseconds();
+                            millsToSet = parsedDate.ToUnixTimeMilliseconds();
                         }
                     }
 
@@ -514,9 +505,9 @@ public class DDataService : IDDataService
                     }
                     else if (sysTimeValue is string dateString)
                     {
-                        if (DateTime.TryParse(dateString, out var parsedDate))
+                        if (UploaderTimestamp.TryParse(dateString, out var parsedDate))
                         {
-                            millsToSet = ((DateTimeOffset)parsedDate).ToUnixTimeMilliseconds();
+                            millsToSet = parsedDate.ToUnixTimeMilliseconds();
                         }
                     }
 
@@ -560,8 +551,7 @@ public class DDataService : IDDataService
             return new List<T>();
 
         // Start with a deep clone of newData
-        var merged =
-            JsonSerializer.Deserialize<List<T>>(JsonSerializer.Serialize(newData)) ?? new List<T>();
+        var merged = DeepClone(newData!);
 
         // Iterate through oldData and add items not found in newData
         for (int i = 0; i < oldData!.Count; i++)
@@ -589,6 +579,22 @@ public class DDataService : IDDataService
         }
 
         return merged;
+    }
+
+    /// <summary>
+    /// A JSON deep clone that keeps each document's <see cref="IProcessableDocument.Id"/>, which the
+    /// serialized form carries only in its lossy wire spelling (<see cref="Nocturne.Core.Models.Serializers.ObjectIdJsonConverter"/>).
+    /// </summary>
+    private static List<T> DeepClone<T>(List<T> source)
+    {
+        var clone = JsonSerializer.Deserialize<List<T>>(JsonSerializer.Serialize(source)) ?? [];
+        for (var i = 0; i < clone.Count; i++)
+        {
+            if (clone[i] is IProcessableDocument copy && source[i] is IProcessableDocument original)
+                copy.Id = original.Id;
+        }
+
+        return clone;
     }
 
     private static string? GetId(object item)
@@ -718,10 +724,18 @@ public class DDataService : IDDataService
     {
         try
         {
+            var window = new Dictionary<string, object>
+            {
+                ["created_at"] = new Dictionary<string, string>
+                {
+                    ["$gte"] = DateTimeOffset.FromUnixTimeMilliseconds(timestamp - DeviceStatusWindowMills).UtcDateTime.ToString("o"),
+                    ["$lte"] = DateTimeOffset.FromUnixTimeMilliseconds(timestamp).UtcDateTime.ToString("o"),
+                },
+            };
             var deviceStatuses = await _projectionService.GetAsync(
                 count: 1000,
                 skip: 0,
-                find: null,
+                find: JsonSerializer.Serialize(window),
                 ct: cancellationToken
             );
             ddata.DeviceStatus = deviceStatuses.ToList();

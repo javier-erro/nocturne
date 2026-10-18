@@ -155,7 +155,7 @@ public class TreatmentsController : BaseV3Controller<Treatment>
 
         // Set appropriate headers
         Response.Headers["ETag"] = FormatCursorETag(treatment.SrvModified ?? treatment.Mills);
-        Response.Headers["Cache-Control"] = "public, max-age=60";
+        Response.Headers["Cache-Control"] = "private, max-age=60";
 
         return Ok(treatment);
     }
@@ -404,12 +404,12 @@ public class TreatmentsController : BaseV3Controller<Treatment>
     /// </summary>
     /// <param name="id">Treatment ID</param>
     /// <param name="cancellationToken">Cancellation token</param>
-    /// <returns>No content on success</returns>
+    /// <returns><c>{"status": 200}</c> on success</returns>
     [HttpDelete("{id}")]
     [Authorize]
     [RequireScope(Scope.TreatmentsReadWrite)]
     [NightscoutEndpoint("/api/v3/treatments/:id")]
-    [ProducesResponseType(204)]
+    [ProducesResponseType(200)]
     [ProducesResponseType(typeof(V3ErrorResponse), 404)]
     [ProducesResponseType(500)]
     [ErrorEnvelope]
@@ -433,7 +433,7 @@ public class TreatmentsController : BaseV3Controller<Treatment>
 
         _logger.LogDebug("Successfully deleted V3 treatment {Id}", id);
 
-        return NoContent();
+        return CreateV3DeleteResponse();
     }
 
     /// <summary>
@@ -540,93 +540,6 @@ public class TreatmentsController : BaseV3Controller<Treatment>
 
     #region Helper Methods
 
-    private new string? ConvertV3FilterToV1Find(JsonElement? filter)
-    {
-        if (!filter.HasValue)
-            return null;
-
-        try
-        {
-            // Convert V3 JSON filter to V1 query string format
-            var filterObj = filter.Value;
-            var queryParts = new List<string>();
-
-            foreach (var property in filterObj.EnumerateObject())
-            {
-                var value = property.Value;
-                if (value.ValueKind == JsonValueKind.Object)
-                {
-                    // Handle operators like $gte, $lte, etc.
-                    foreach (var op in value.EnumerateObject())
-                    {
-                        queryParts.Add($"find[{property.Name}][{op.Name}]={op.Value}");
-                    }
-                }
-                else
-                {
-                    // Simple equality
-                    queryParts.Add($"find[{property.Name}]={value}");
-                }
-            }
-
-            return queryParts.Count > 0 ? string.Join("&", queryParts) : null;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to convert V3 filter to V1 find query");
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Convert V3 filter criteria (field$op=value format) to MongoDB-style JSON query
-    /// </summary>
-    /// <param name="filterCriteria">List of parsed filter criteria</param>
-    /// <returns>MongoDB-style JSON query string, or null if no criteria</returns>
-    private string? ConvertFilterCriteriaToFindQuery(List<V3FilterCriteria>? filterCriteria)
-    {
-        if (filterCriteria == null || filterCriteria.Count == 0)
-            return null;
-
-        var conditions = new Dictionary<string, object>();
-
-        foreach (var criteria in filterCriteria)
-        {
-            var mongoOp = criteria.Operator switch
-            {
-                "eq" => null, // Direct equality doesn't need operator
-                "ne" => "$ne",
-                "gt" => "$gt",
-                "gte" => "$gte",
-                "lt" => "$lt",
-                "lte" => "$lte",
-                "in" => "$in",
-                "nin" => "$nin",
-                "re" => "$regex",
-                _ => null,
-            };
-
-            if (mongoOp == null && criteria.Operator == "eq")
-            {
-                // Direct equality: { "field": "value" }
-                conditions[criteria.Field] = criteria.Value ?? "";
-            }
-            else if (mongoOp != null)
-            {
-                // Operator form: { "field": { "$op": "value" } }
-                conditions[criteria.Field] = new Dictionary<string, object?>
-                {
-                    [mongoOp] = criteria.Value,
-                };
-            }
-        }
-
-        if (conditions.Count == 0)
-            return null;
-
-        return JsonSerializer.Serialize(conditions);
-    }
-
     private async Task<long> GetTotalCountAsync(
         string? findQuery,
         CancellationToken cancellationToken
@@ -652,16 +565,12 @@ public class TreatmentsController : BaseV3Controller<Treatment>
 
         // Use the most recent treatment's created_at as last modified
         var latestCreatedAt = treatments
-            .Where(t => !string.IsNullOrEmpty(t.CreatedAt))
-            .Select(t => DateTime.Parse(t.CreatedAt!))
+            .Select(t => UploaderTimestamp.ParseUtcDateTime(t.CreatedAt))
+            .OfType<DateTime>()
             .DefaultIfEmpty(DateTime.UtcNow)
             .Max();
 
-        // Ensure DateTime is treated as UTC to avoid ArgumentException when creating DateTimeOffset
-        return new DateTimeOffset(
-            DateTime.SpecifyKind(latestCreatedAt, DateTimeKind.Utc),
-            TimeSpan.Zero
-        );
+        return new DateTimeOffset(latestCreatedAt, TimeSpan.Zero);
     }
 
     #endregion

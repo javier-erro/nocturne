@@ -11,7 +11,8 @@
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Label } from "$lib/components/ui/label";
-  import { CheckCircle2, MailCheck } from "lucide-svelte";
+  import CheckCircle2 from "@lucide/svelte/icons/circle-check";
+  import MailCheck from "@lucide/svelte/icons/mail-check";
 
   let {
     email = $bindable(""),
@@ -148,7 +149,7 @@
           autocomplete="one-time-code"
           bind:value={code}
           disabled={busy}
-          class="font-mono tracking-widest"
+          variant="code"
           placeholder="1234"
         />
         <p class="text-sm text-muted-foreground">
@@ -167,7 +168,7 @@
 
   {#if phase === "done"}
     <div class="flex items-start gap-2 text-sm">
-      <CheckCircle2 class="h-5 w-5 text-green-600 shrink-0" />
+      <CheckCircle2 class="h-5 w-5 text-success shrink-0" />
       <div>
         <p class="font-medium">Glooko XT connected.</p>
         <p class="text-muted-foreground">

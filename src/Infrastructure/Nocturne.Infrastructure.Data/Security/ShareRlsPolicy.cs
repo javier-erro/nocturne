@@ -39,41 +39,60 @@ public static class ShareRlsPolicy
 
     /// <summary>
     /// Idempotent DDL that enables RLS on the table and (re)creates the share-category policy.
-    /// A non-share connection (<c>app.is_share</c> ≠ 'true') is unaffected; a public share sees
-    /// the table's rows only when <paramref name="governingScope"/> is present in
-    /// <c>app.visible_categories</c> — and, when <paramref name="recencyColumn"/> is given, only
-    /// rows from the last 24 hours unless <c>app.share_full_history</c> is 'true' (fail-closed:
-    /// a share connection that never sets the GUC gets the clamp). A table with no governing
-    /// scope is hidden from shares entirely. The policy is FOR SELECT only, so writes
-    /// (background ingest) are unaffected.
+    /// A non-share connection (<c>app.is_share</c> is not 'true') passes the category gate; a
+    /// public share sees the table's rows only when <paramref name="governingScope"/> is present
+    /// in <c>app.visible_categories</c>, and a table with no governing scope is hidden from shares
+    /// entirely. When <paramref name="recencyColumn"/> is given, a history-clamped connection sees
+    /// only rows from the last 24 hours. A share is clamped unless <c>app.share_full_history</c> is
+    /// 'true' (fail-closed); any other connection is clamped only when <c>app.history_clamped</c>
+    /// is 'true' (fail-open, so a connection that never sets it reads full history). The policy is
+    /// FOR SELECT only, so writes (background ingest) are unaffected.
     /// </summary>
     /// <param name="table">The snake_case table name.</param>
     /// <param name="governingScope">The OAuth read scope that unlocks the table for a share,
     /// or <c>null</c> when the table is hidden from shares.</param>
     /// <param name="recencyColumn">The timestamp column the 24-hour clamp applies to, or
     /// <c>null</c> when the table is exempt (catalog data with no per-row time).</param>
-    public static string BuildPolicySql(string table, string? governingScope, string? recencyColumn = null)
+    /// <param name="spanEndColumn">For a table of spans, the end column the clamp applies to by
+    /// overlap instead: a row whose end is null (still running) or inside the last 24 hours stays
+    /// visible. Exclusive with <paramref name="recencyColumn"/>.</param>
+    public static string BuildPolicySql(
+        string table, string? governingScope, string? recencyColumn = null, string? spanEndColumn = null)
     {
         SqlIdentifier.Require(table, nameof(table));
         if (governingScope is not null && !ScopePattern.IsMatch(governingScope))
             throw new ArgumentException($"Unsafe scope identifier '{governingScope}'.", nameof(governingScope));
         if (recencyColumn is not null)
             SqlIdentifier.Require(recencyColumn, nameof(recencyColumn));
+        if (spanEndColumn is not null)
+            SqlIdentifier.Require(spanEndColumn, nameof(spanEndColumn));
+        if (recencyColumn is not null && spanEndColumn is not null)
+            throw new ArgumentException("A table is clamped by a recency column or a span end column, not both.");
 
         var usingExpr = "current_setting('app.is_share', true) IS DISTINCT FROM 'true'";
         if (governingScope is not null)
         {
-            var shareExpr =
-                $"'{governingScope}' = ANY(string_to_array(current_setting('app.visible_categories', true), ','))";
-            if (recencyColumn is not null)
-            {
-                // "timestamp" is quoted: it is a type keyword in PostgreSQL.
-                shareExpr =
-                    $"({shareExpr} AND (current_setting('app.share_full_history', true) = 'true'" +
-                    $" OR \"{recencyColumn}\" >= now() - interval '24 hours'))";
-            }
+            usingExpr =
+                $"({usingExpr} OR '{governingScope}' = ANY(string_to_array(current_setting('app.visible_categories', true), ',')))";
+        }
 
-            usingExpr += $" OR {shareExpr}";
+        var recent = recencyColumn is not null
+            ? $"\"{recencyColumn}\" >= now() - interval '24 hours'"
+            : spanEndColumn is not null
+                ? $"(\"{spanEndColumn}\" IS NULL OR \"{spanEndColumn}\" >= now() - interval '24 hours')"
+                : null;
+
+        if (recent is not null)
+        {
+            // IS [NOT] DISTINCT FROM keeps the clamp test non-null when a GUC is unset, so an
+            // unset app.history_clamped leaves a non-share unclamped instead of hiding the row.
+            const string clamped =
+                "(current_setting('app.is_share', true) IS NOT DISTINCT FROM 'true'" +
+                " AND current_setting('app.share_full_history', true) IS DISTINCT FROM 'true')" +
+                " OR current_setting('app.history_clamped', true) IS NOT DISTINCT FROM 'true'";
+
+            // "timestamp" is quoted: it is a type keyword in PostgreSQL.
+            usingExpr += $" AND ({recent} OR NOT ({clamped}))";
         }
 
         return $"""

@@ -1,6 +1,6 @@
 // See https://svelte.dev/docs/kit/types#app
 // for information about these interfaces
-import { ApiClient, UserDisplayPreferences } from "$lib/api";
+import { ApiClient, RustValidationIssue, UserDisplayPreferences } from "$lib/api";
 import type { LastSignIn } from "$lib/components/auth/last-sign-in";
 
 
@@ -23,7 +23,7 @@ export interface AuthUser {
 	email?: string;
 	roles: string[];
 	permissions: string[];
-	expiresAt?: Date;
+	expiresAt?: string;
 	/** User's preferred language code (e.g., "en", "fr", "de") */
 	preferredLanguage?: string;
 	/** Per-user display preferences (units, time format, theme, chart style, etc.) */
@@ -41,8 +41,12 @@ declare global {
 			message: string;
 			details?: string;
 			errorId?: string;
+			/** The server's structured validation issues, when the rejection carried them. */
+			issues?: RustValidationIssue[];
 		}
 		type TenantStatus = TenantStatusResponse;
+		/** How this request's status call settled: its body, or the failure the client threw. */
+		type StatusProbe = { ok: true; body: TenantStatusResponse } | { ok: false; error: unknown };
 		interface Locals {
 			apiClient: ApiClient;
 			/** Whether this request arrived on a public share host ({token}.share.{base-domain}). */
@@ -66,13 +70,22 @@ declare global {
 			 */
 			isAuthenticated: boolean;
 			/**
-			 * Whether the API readiness probe has already run for this request
+			 * This request's status call, started by the status probe handle. Unset where the
+			 * probe is skipped or a cached ready answer stood in for it.
 			 */
-			statusProbed?: boolean;
+			statusProbe?: Promise<StatusProbe>;
 			/**
 			 * Effective permissions (granted scopes) for the current user on the current tenant
 			 */
 			effectivePermissions?: string[];
+			/**
+			 * Whether the current user may read only the last 24 hours of time-series data
+			 */
+			limitTo24Hours?: boolean;
+			/**
+			 * Whether the current user is the demo visitor account the demo-subject gate refuses
+			 */
+			refusedAsDemoSubject?: boolean;
 			/**
 			 * Whether the current user is a platform administrator
 			 */
@@ -92,27 +105,28 @@ declare global {
 			guestExpiresAt?: string;
 		}
 
-		// Base page data interface for the main app
-		interface BasePageData {
-			loading: boolean;
+		// Fields any page's data may carry, all optional; each route's own load types the rest.
+		interface PageData {
+			loading?: boolean;
 			loadingMessage?: string;
 			error?: string;
-			serverSettings: ServerSettings | null;
-			entries: Entry[];
-			treatments: Treatment[];
-			deviceStatus: DeviceStatus[];
+			serverSettings?: ServerSettings | null;
+			entries?: Entry[];
+			treatments?: Treatment[];
+			deviceStatus?: DeviceStatus[];
 			initialData?: {
 				now: number;
 				history: number;
 				focusHours: number;
 			};
 			/** Resolved by the root layout from the hint cookie the API writes. */
-			lastSignIn: LastSignIn | null;
-		}
-
-		// Main PageData interface that allows additional properties for reports
-		interface PageData extends Partial<BasePageData> {
-			[key: string]: any;
+			lastSignIn?: LastSignIn | null;
+			/** The viewer's granted scopes, resolved by the root layout. */
+			effectivePermissions?: string[];
+			/** Whether the viewer may read only the last 24 hours, resolved by the root layout. */
+			limitTo24Hours?: boolean;
+			/** Whether the viewer is the demo visitor account, resolved by the root layout. */
+			refusedAsDemoSubject?: boolean;
 		}
 		// Shallow-routing state. Dialogs key their browser-history entries here
 		// (see useDialogHistory) so the back button can dismiss them.

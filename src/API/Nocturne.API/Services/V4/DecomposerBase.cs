@@ -48,11 +48,15 @@ public abstract class DecomposerBase
     /// siblings orphans that row outright.
     /// </para>
     /// </remarks>
+    /// <param name="findStored">
+    /// Resolves the stored record in place of the lookup by <paramref name="legacyId"/>, for a caller
+    /// that already knows it, including a stored record with no legacy id at all.
+    /// </param>
     /// <returns>
     /// The persisted record and whether it was inserted rather than updated, or <see langword="null"/>
     /// when the write was refused because the record's identity is already held
     /// (<see cref="RecreationBlockedException"/>) — the outcome the batch path reaches by dropping
-    /// the record from its insert set.
+    /// the record from its insert set. It is counted in <see cref="DecompositionResult.SkippedDeleted"/>.
     /// </returns>
     protected async Task<(TRecord Record, bool Created)?> UpsertByLegacyIdAsync<TRecord>(
         ILegacyKeyedRepository<TRecord> repository,
@@ -62,10 +66,13 @@ public abstract class DecomposerBase
         WriteOrigin origin,
         CancellationToken ct,
         Func<TRecord?, Task>? beforeWrite = null,
-        bool preserveStoredCorrelationId = false)
+        bool preserveStoredCorrelationId = false,
+        Func<Task<TRecord?>>? findStored = null)
         where TRecord : class, IV4Record
     {
-        var existing = legacyId is null ? null : await repository.GetByLegacyIdAsync(legacyId, ct);
+        var existing = findStored is not null
+            ? await findStored()
+            : legacyId is null ? null : await repository.GetByLegacyIdAsync(legacyId, ct);
 
         if (beforeWrite is not null)
             await beforeWrite(existing);
@@ -81,9 +88,9 @@ public abstract class DecomposerBase
             }
             catch (RecreationBlockedException)
             {
-                Logger.LogDebug(
-                    "Skipped {RecordType} from legacy record {LegacyId}: its identity is already held",
-                    recordType, legacyId);
+                // No live row carries the legacy id, so what holds it is the user's deletion.
+                result.SkippedDeleted++;
+                Logger.LogDebug("Skipped a {RecordType}: its identity is held by a deleted record", recordType);
                 return null;
             }
 
@@ -148,6 +155,63 @@ public abstract class DecomposerBase
     protected static IDisposable SystemAttributedBatchWrites(IAuditContext auditContext)
         => SystemAuditScope.Push(auditContext);
 
+    protected static bool TryGetString(Dictionary<string, object> props, string key, out string value)
+    {
+        value = default!;
+        if (!props.TryGetValue(key, out var obj))
+            return false;
+
+        if (obj is string s) { value = s; return true; }
+        if (obj is System.Text.Json.JsonElement el && el.ValueKind == System.Text.Json.JsonValueKind.String)
+        { value = el.GetString()!; return true; }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Parses an enum from one defined member name, ignoring case. <see cref="Enum.TryParse{TEnum}(string, bool, out TEnum)"/>
+    /// also accepts numeric strings, comma lists that OR members together and padding, none of which
+    /// an upload's string field can be trusted to mean.
+    /// </summary>
+    protected static bool TryParseDefinedName<TEnum>(string? value, out TEnum result)
+        where TEnum : struct, Enum
+    {
+        foreach (var name in Enum.GetNames<TEnum>())
+        {
+            if (string.Equals(name, value, StringComparison.OrdinalIgnoreCase))
+            {
+                result = Enum.Parse<TEnum>(name);
+                return true;
+            }
+        }
+
+        result = default;
+        return false;
+    }
+
+    /// <summary>
+    /// The batch twin of <see cref="UpsertByLegacyIdAsync"/>: a record whose legacy id is stored
+    /// updates that row and lands in <see cref="DecompositionResult.UpdatedRecords"/>, so a resend
+    /// through the batch path writes what the same resend through the single path writes.
+    /// </summary>
+    protected static async Task BulkUpsertAsync<TRecord>(
+        IBulkUpsertRepository<TRecord> repository,
+        List<TRecord> records,
+        DecompositionResult result,
+        WriteOrigin origin,
+        CancellationToken ct)
+        where TRecord : class
+    {
+        if (records.Count == 0)
+            return;
+
+        var written = await repository.BulkUpsertAsync(records, origin, ct);
+        var updated = new HashSet<TRecord>(written.Updated, ReferenceEqualityComparer.Instance);
+        result.CreatedRecords.AddRange(written.Where(r => !updated.Contains(r)));
+        result.UpdatedRecords.AddRange(written.Updated);
+        result.SkippedDeleted += written.SkippedDeleted;
+    }
+
     protected static async Task BulkCreateAsync<TRecord>(
         IBulkCreateRepository<TRecord> repository,
         List<TRecord> records,
@@ -159,6 +223,8 @@ public abstract class DecomposerBase
         if (records.Count == 0)
             return;
 
-        result.CreatedRecords.AddRange(await repository.BulkCreateAsync(records, origin, ct));
+        var written = await repository.BulkCreateAsync(records, origin, ct);
+        result.CreatedRecords.AddRange(written);
+        result.SkippedDeleted += written.SkippedDeleted;
     }
 }

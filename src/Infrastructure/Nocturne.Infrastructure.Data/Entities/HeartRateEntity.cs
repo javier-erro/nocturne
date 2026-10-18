@@ -14,9 +14,6 @@ public class HeartRateEntity
     /// <summary>
     /// Identifier of the tenant this heart rate record belongs to
     /// </summary>
-    /// <summary>
-    /// The unique identifier of the tenant this record belongs to.
-    /// </summary>
     [Column("tenant_id")]
     public Guid TenantId { get; set; }
 
@@ -50,6 +47,12 @@ public class HeartRateEntity
     /// </summary>
     [Column("accuracy")]
     public int Accuracy { get; set; }
+
+    /// <summary>
+    /// Legacy activity <c>type</c> as uploaded
+    /// </summary>
+    [Column("type")]
+    public string? Type { get; set; }
 
     /// <summary>
     /// Device identifier that recorded this reading

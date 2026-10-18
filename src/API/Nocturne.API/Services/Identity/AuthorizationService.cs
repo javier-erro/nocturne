@@ -8,6 +8,7 @@ using Nocturne.API.Services.Auth;
 using Nocturne.Connectors.Core.Utilities;
 using Nocturne.Core.Contracts.Auth;
 using Nocturne.Core.Contracts.Identity;
+using Nocturne.Core.Contracts.Multitenancy;
 using Nocturne.Core.Models;
 using Nocturne.Infrastructure.Data;
 using Nocturne.Infrastructure.Data.Entities;
@@ -36,12 +37,11 @@ public class AuthorizationService : IAuthorizationService, IDisposable
     private readonly IDirectGrantService _directGrantService;
     private readonly IJwtService _jwtService;
     private readonly NocturneDbContext _dbContext;
+    private readonly ICategoryReadContext _categoryReadContext;
     private readonly PermissionTrie _permissionTrie;
     private readonly Dictionary<string, Permission> _seenPermissions = new();
     private readonly object _permissionsLock = new();
 
-    // Memory protection for _seenPermissions
-    private const int MAX_PERMISSIONS_CACHE_SIZE = 5000;
     private bool _disposed;
 
     /// <summary>
@@ -57,7 +57,8 @@ public class AuthorizationService : IAuthorizationService, IDisposable
         IRoleService roleService,
         IDirectGrantService directGrantService,
         IJwtService jwtService,
-        NocturneDbContext dbContext
+        NocturneDbContext dbContext,
+        ICategoryReadContext categoryReadContext
     )
     {
         _configuration = configuration;
@@ -67,6 +68,7 @@ public class AuthorizationService : IAuthorizationService, IDisposable
         _directGrantService = directGrantService;
         _jwtService = jwtService;
         _dbContext = dbContext;
+        _categoryReadContext = categoryReadContext;
         _permissionTrie = new PermissionTrie();
 
         // Initialize with common permissions
@@ -84,21 +86,13 @@ public class AuthorizationService : IAuthorizationService, IDisposable
     /// <returns>Authorization response with JWT token</returns>
     public async Task<AuthorizationResponse?> GenerateJwtFromAccessTokenAsync(string accessToken)
     {
-        try
-        {
-            _logger.LogDebug("Generating JWT for access token");
-            return await GenerateJwtFromDirectGrantAsync(accessToken);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error generating JWT from access token");
-            return null;
-        }
+        _logger.LogDebug("Generating JWT for access token");
+        return await GenerateJwtFromDirectGrantAsync(accessToken);
     }
 
     /// <summary>
     /// Exchange a noc_ direct-grant token for a JWT. Direct grants authorize by scope,
-    /// so the minted JWT carries the grant's scopes and tenant pin rather than the
+    /// so the minted JWT carries the grant's scopes, tenant pin and 24-hour limit rather than the
     /// subject's roles/permissions, and downstream requests authenticate through
     /// <see cref="Middleware.Handlers.OAuthAccessTokenHandler"/>.
     /// The grants query relies on the tenant-pinned scoped context's global query
@@ -149,6 +143,7 @@ public class AuthorizationService : IAuthorizationService, IDisposable
             permissions: [],
             roles: [],
             scopes: grant.Scopes,
+            limitTo24Hours: grant.LimitTo24Hours,
             tenantId: grant.TenantId,
             lifetime: ExchangedJwtLifetime,
             grantId: grant.Id
@@ -186,50 +181,42 @@ public class AuthorizationService : IAuthorizationService, IDisposable
     /// <returns>List of permissions with usage statistics</returns>
     public async Task<PermissionsResponse> GetAllPermissionsAsync()
     {
-        try
+        _logger.LogDebug("Getting all seen permissions");
+
+        var permissions = new List<Permission>();
+
+        lock (_permissionsLock)
         {
-            _logger.LogDebug("Getting all seen permissions");
+            permissions = _seenPermissions.Values.ToList();
+        }
 
-            var permissions = new List<Permission>();
+        var roles = await _roleService.GetAllRolesAsync();
 
-            lock (_permissionsLock)
+        var now = DateTime.UtcNow;
+
+        foreach (var role in roles)
+        {
+            foreach (var permission in role.Permissions)
             {
-                permissions = _seenPermissions.Values.ToList();
-            }
-
-            var roles = await _roleService.GetAllRolesAsync();
-
-            var now = DateTime.UtcNow;
-
-            foreach (var role in roles)
-            {
-                foreach (var permission in role.Permissions)
+                if (!_seenPermissions.ContainsKey(permission))
                 {
-                    if (!_seenPermissions.ContainsKey(permission))
-                    {
-                        permissions.Add(
-                            new Permission
-                            {
-                                Name = permission,
-                                Count = 0,
-                                FirstSeen = now,
-                                LastSeen = now,
-                            }
-                        );
-                    }
+                    permissions.Add(
+                        new Permission
+                        {
+                            Name = permission,
+                            Count = 0,
+                            FirstSeen = now,
+                            LastSeen = now,
+                        }
+                    );
                 }
             }
+        }
 
-            return new PermissionsResponse
-            {
-                Permissions = permissions.OrderBy(p => p.Name).ToList(),
-            };
-        }
-        catch (Exception ex)
+        return new PermissionsResponse
         {
-            _logger.LogError(ex, "Error getting all permissions");
-            return new PermissionsResponse();
-        }
+            Permissions = permissions.OrderBy(p => p.Name).ToList(),
+        };
     }
 
     /// <summary>
@@ -238,49 +225,38 @@ public class AuthorizationService : IAuthorizationService, IDisposable
     /// <returns>Permission trie structure</returns>
     public async Task<PermissionTrieResponse> GetPermissionTrieAsync()
     {
-        try
+        _logger.LogDebug("Building permission trie structure");
+
+        var roles = await _roleService.GetAllRolesAsync();
+
+        var allPermissions = new HashSet<string>();
+        foreach (var role in roles)
         {
-            _logger.LogDebug("Building permission trie structure");
-
-            var roles = await _roleService.GetAllRolesAsync();
-
-            var allPermissions = new HashSet<string>();
-            foreach (var role in roles)
+            foreach (var permission in role.Permissions)
             {
-                foreach (var permission in role.Permissions)
-                {
-                    allPermissions.Add(permission);
-                }
+                allPermissions.Add(permission);
             }
-
-            // Add seen permissions
-            lock (_permissionsLock)
-            {
-                foreach (var permission in _seenPermissions.Keys)
-                {
-                    allPermissions.Add(permission);
-                }
-            }
-
-            // Build new trie with all permissions
-            var trie = new PermissionTrie();
-            trie.Add(allPermissions);
-
-            // Convert to our response format
-            var response = new PermissionTrieResponse
-            {
-                Root = BuildTrieNode(trie),
-                Count = trie.Count,
-            };
-
-            _logger.LogDebug("Built permission trie with {Count} permissions", response.Count);
-            return response;
         }
-        catch (Exception ex)
+
+        lock (_permissionsLock)
         {
-            _logger.LogError(ex, "Error building permission trie");
-            return new PermissionTrieResponse();
+            foreach (var permission in _seenPermissions.Keys)
+            {
+                allPermissions.Add(permission);
+            }
         }
+
+        var trie = new PermissionTrie();
+        trie.Add(allPermissions);
+
+        var response = new PermissionTrieResponse
+        {
+            Root = BuildTrieNode(trie),
+            Count = trie.Count,
+        };
+
+        _logger.LogDebug("Built permission trie with {Count} permissions", response.Count);
+        return response;
     }
 
     /// <summary>
@@ -317,49 +293,6 @@ public class AuthorizationService : IAuthorizationService, IDisposable
             );
             return false;
         }
-    }
-
-    /// <summary>
-    /// Record a permission usage for statistics
-    /// </summary>
-    /// <param name="permission">Permission that was used</param>
-    public Task RecordPermissionUsageAsync(string permission)
-    {
-        try
-        {
-            lock (_permissionsLock)
-            {
-                var now = DateTime.UtcNow;
-
-                if (_seenPermissions.ContainsKey(permission))
-                {
-                    _seenPermissions[permission].Count++;
-                    _seenPermissions[permission].LastSeen = now;
-                }
-                else
-                {
-                    _seenPermissions[permission] = new Permission
-                    {
-                        Name = permission,
-                        Count = 1,
-                        FirstSeen = now,
-                        LastSeen = now,
-                    };
-                }
-
-                // Periodically clean up old permissions to prevent memory leaks
-                if (_seenPermissions.Count % 100 == 0)
-                {
-                    CleanupOldPermissions();
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error recording permission usage for {Permission}", permission);
-        }
-
-        return Task.CompletedTask;
     }
 
     // A Nightscout "subject" is an API token, not a person: a name, a set of roles and an access
@@ -458,6 +391,9 @@ public class AuthorizationService : IAuthorizationService, IDisposable
                 label,
                 [.. scopes],
                 expiresAt: null,
+                // A clamped caller may not mint a token wider than itself; see
+                // HttpContextExtensions.IsCallerHistoryClamped.
+                limitTo24Hours: _categoryReadContext.IsHistoryClamped,
                 ipAddress: null,
                 userAgent: null);
 
@@ -912,55 +848,6 @@ public class AuthorizationService : IAuthorizationService, IDisposable
         }
 
         return root;
-    }
-
-    /// <summary>
-    /// Clean up old permissions from the cache to prevent unbounded memory growth
-    /// </summary>
-    private void CleanupOldPermissions()
-    {
-        try
-        {
-            if (_seenPermissions.Count <= MAX_PERMISSIONS_CACHE_SIZE)
-                return;
-
-            var now = DateTime.UtcNow;
-            var cutoffTime = now.AddDays(-30); // Remove permissions not seen in 30 days
-
-            var permissionsToRemove = _seenPermissions
-                .Where(kvp => kvp.Value.LastSeen < cutoffTime)
-                .Select(kvp => kvp.Key)
-                .ToList();
-
-            foreach (var permission in permissionsToRemove)
-            {
-                _seenPermissions.Remove(permission);
-            }
-
-            // If still too many, remove the least recently used
-            if (_seenPermissions.Count > MAX_PERMISSIONS_CACHE_SIZE)
-            {
-                var lruPermissions = _seenPermissions
-                    .OrderBy(kvp => kvp.Value.LastSeen)
-                    .Take(_seenPermissions.Count - (MAX_PERMISSIONS_CACHE_SIZE * 3 / 4))
-                    .Select(kvp => kvp.Key)
-                    .ToList();
-
-                foreach (var permission in lruPermissions)
-                {
-                    _seenPermissions.Remove(permission);
-                }
-            }
-
-            _logger.LogDebug(
-                "Cleaned up permissions cache, current size: {Count}",
-                _seenPermissions.Count
-            );
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error cleaning up permissions cache");
-        }
     }
 
     /// <summary>

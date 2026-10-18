@@ -5,6 +5,7 @@ using Moq;
 using Nocturne.API.Services.Audit;
 using Nocturne.API.Services.V4;
 using Nocturne.Core.Contracts.Audit;
+using Nocturne.Core.Contracts.Infrastructure;
 using Nocturne.Core.Contracts.Devices;
 using Nocturne.Core.Contracts.Glucose;
 using Nocturne.Core.Contracts.Profiles.Resolvers;
@@ -56,11 +57,7 @@ public class TreatmentDecomposerDeleteTests : IDisposable
 
     public TreatmentDecomposerDeleteTests()
     {
-        _db = TestDbContextFactory.CreateSqlite();
-
-        using var db = NewContext();
-        db.Tenants.Add(new TenantEntity { Id = TenantId, Slug = "test" });
-        db.SaveChanges();
+        _db = TestDbContextFactory.CreateSqliteWithTenant(TenantId, SqliteNpgsqlJson.Translate);
     }
 
     public void Dispose()
@@ -161,7 +158,7 @@ public class TreatmentDecomposerDeleteTests : IDisposable
             Id = Guid.CreateVersion7(),
             TenantId = TenantId,
             LegacyId = legacyIdFor("tempbasal"),
-            StartTimestamp = Inside,
+            Timestamp = Inside,
             Rate = 0.8,
             Origin = "Algorithm"
         });
@@ -184,13 +181,13 @@ public class TreatmentDecomposerDeleteTests : IDisposable
 
         await using var assertCtx = NewContext();
 
-        (await assertCtx.GetBlockingLegacyIdsAsync<BolusEntity>(["bolus-1"])).Should().Contain("bolus-1");
-        (await assertCtx.GetBlockingLegacyIdsAsync<CarbIntakeEntity>(["carb-1"])).Should().Contain("carb-1");
-        (await assertCtx.GetBlockingLegacyIdsAsync<BGCheckEntity>(["bgcheck-1"])).Should().Contain("bgcheck-1");
-        (await assertCtx.GetBlockingLegacyIdsAsync<NoteEntity>(["note-1"])).Should().Contain("note-1");
-        (await assertCtx.GetBlockingLegacyIdsAsync<DeviceEventEntity>(["devevent-1"])).Should().Contain("devevent-1");
-        (await assertCtx.GetBlockingLegacyIdsAsync<BolusCalculationEntity>(["boluscalc-1"])).Should().Contain("boluscalc-1");
-        (await assertCtx.GetBlockingLegacyIdsAsync<TempBasalEntity>(["tempbasal-1"])).Should().Contain("tempbasal-1");
+        (await assertCtx.GetBlockingLegacyIdsAsync<BolusEntity>(["bolus-1"])).Held.Should().Contain("bolus-1");
+        (await assertCtx.GetBlockingLegacyIdsAsync<CarbIntakeEntity>(["carb-1"])).Held.Should().Contain("carb-1");
+        (await assertCtx.GetBlockingLegacyIdsAsync<BGCheckEntity>(["bgcheck-1"])).Held.Should().Contain("bgcheck-1");
+        (await assertCtx.GetBlockingLegacyIdsAsync<NoteEntity>(["note-1"])).Held.Should().Contain("note-1");
+        (await assertCtx.GetBlockingLegacyIdsAsync<DeviceEventEntity>(["devevent-1"])).Held.Should().Contain("devevent-1");
+        (await assertCtx.GetBlockingLegacyIdsAsync<BolusCalculationEntity>(["boluscalc-1"])).Held.Should().Contain("boluscalc-1");
+        (await assertCtx.GetBlockingLegacyIdsAsync<TempBasalEntity>(["tempbasal-1"])).Held.Should().Contain("tempbasal-1");
     }
 
     [Fact]
@@ -234,9 +231,52 @@ public class TreatmentDecomposerDeleteTests : IDisposable
         var bolus = await assertCtx.Boluses.IgnoreQueryFilters().SingleAsync(b => b.LegacyId == "bolus-1");
         bolus.DeletedAt.Should().NotBeNull();
 
-        (await assertCtx.GetBlockingLegacyIdsAsync<BolusEntity>(["bolus-1"])).Should().BeEmpty();
-        (await assertCtx.GetBlockingLegacyIdsAsync<TempBasalEntity>(["tempbasal-1"])).Should().BeEmpty();
+        (await assertCtx.GetBlockingLegacyIdsAsync<BolusEntity>(["bolus-1"])).Held.Should().BeEmpty();
+        (await assertCtx.GetBlockingLegacyIdsAsync<TempBasalEntity>(["tempbasal-1"])).Held.Should().BeEmpty();
         (await assertCtx.MutationAuditLog.AnyAsync()).Should().BeFalse();
+    }
+
+    private void SeedStateSpan(string originalId, string category, string source, string? metadataJson, DateTime start)
+    {
+        using var db = NewContext();
+        db.StateSpans.Add(new StateSpanEntity
+        {
+            Id = Guid.CreateVersion7(),
+            TenantId = TenantId,
+            OriginalId = originalId,
+            Category = category,
+            State = "Active",
+            StartTimestamp = start,
+            Source = source,
+            MetadataJson = metadataJson,
+        });
+        db.SaveChanges();
+    }
+
+    [Fact]
+    public async Task BulkDelete_UserContext_TombstonesTheServedStateSpansInTheWindowOnly()
+    {
+        SeedOneOfEachType();
+        SeedStateSpan("override-1", "Override", "loop", """{"collection":"treatments","utcOffset":0}""", Inside);
+        SeedStateSpan("tt-1", "TemporaryTarget", "aaps", """{"utcOffset":0}""", Inside);
+        SeedStateSpan("ps-1", "Profile", "aaps", """{"profileName":"Weekend","utcOffset":0}""", Inside);
+        SeedStateSpan("ps-outside", "Profile", "aaps", """{"utcOffset":0}""", Outside);
+        SeedStateSpan("glooko-profile", "Profile", "glooko-connector", """{"profileName":"Unknown"}""", Inside);
+        SeedStateSpan("devicestatus-override", "Override", "loop", """{"collection":"devicestatus"}""", Inside);
+
+        var count = await BulkDeleteAsync(_userAuditContext);
+
+        await using var assertCtx = NewContext();
+        var deleted = await assertCtx.StateSpans.IgnoreQueryFilters()
+            .Where(s => s.DeletedAt != null)
+            .Select(s => new { s.OriginalId, ByUser = EF.Property<bool>(s, "DeletedByUser") })
+            .ToListAsync();
+        deleted.Select(s => s.OriginalId).Should().BeEquivalentTo(new[] { "override-1", "tt-1", "ps-1" });
+        count.Should().Be(10);
+        deleted.Should().OnlyContain(s => s.ByUser);
+        (await assertCtx.MutationAuditLog.Where(a => a.Action == "bulk_delete" && a.EntityType == "StateSpan")
+                .Select(a => a.ChangesJson).SingleAsync())
+            .Should().Contain("\"count\":3");
     }
 
     private async Task<int> DeleteByLegacyIdAsync(IAuditContext auditContext)
@@ -255,13 +295,13 @@ public class TreatmentDecomposerDeleteTests : IDisposable
 
         await using var assertCtx = NewContext();
 
-        (await assertCtx.GetBlockingLegacyIdsAsync<BolusEntity>([LegacyTreatmentId])).Should().Contain(LegacyTreatmentId);
-        (await assertCtx.GetBlockingLegacyIdsAsync<CarbIntakeEntity>([LegacyTreatmentId])).Should().Contain(LegacyTreatmentId);
-        (await assertCtx.GetBlockingLegacyIdsAsync<BGCheckEntity>([LegacyTreatmentId])).Should().Contain(LegacyTreatmentId);
-        (await assertCtx.GetBlockingLegacyIdsAsync<NoteEntity>([LegacyTreatmentId])).Should().Contain(LegacyTreatmentId);
-        (await assertCtx.GetBlockingLegacyIdsAsync<DeviceEventEntity>([LegacyTreatmentId])).Should().Contain(LegacyTreatmentId);
-        (await assertCtx.GetBlockingLegacyIdsAsync<BolusCalculationEntity>([LegacyTreatmentId])).Should().Contain(LegacyTreatmentId);
-        (await assertCtx.GetBlockingLegacyIdsAsync<TempBasalEntity>([LegacyTreatmentId])).Should().Contain(LegacyTreatmentId);
+        (await assertCtx.GetBlockingLegacyIdsAsync<BolusEntity>([LegacyTreatmentId])).Held.Should().Contain(LegacyTreatmentId);
+        (await assertCtx.GetBlockingLegacyIdsAsync<CarbIntakeEntity>([LegacyTreatmentId])).Held.Should().Contain(LegacyTreatmentId);
+        (await assertCtx.GetBlockingLegacyIdsAsync<BGCheckEntity>([LegacyTreatmentId])).Held.Should().Contain(LegacyTreatmentId);
+        (await assertCtx.GetBlockingLegacyIdsAsync<NoteEntity>([LegacyTreatmentId])).Held.Should().Contain(LegacyTreatmentId);
+        (await assertCtx.GetBlockingLegacyIdsAsync<DeviceEventEntity>([LegacyTreatmentId])).Held.Should().Contain(LegacyTreatmentId);
+        (await assertCtx.GetBlockingLegacyIdsAsync<BolusCalculationEntity>([LegacyTreatmentId])).Held.Should().Contain(LegacyTreatmentId);
+        (await assertCtx.GetBlockingLegacyIdsAsync<TempBasalEntity>([LegacyTreatmentId])).Held.Should().Contain(LegacyTreatmentId);
     }
 
     [Fact]
@@ -308,8 +348,8 @@ public class TreatmentDecomposerDeleteTests : IDisposable
             .SingleAsync(b => b.LegacyId == LegacyTreatmentId);
         bolus.DeletedAt.Should().NotBeNull();
 
-        (await assertCtx.GetBlockingLegacyIdsAsync<BolusEntity>([LegacyTreatmentId])).Should().BeEmpty();
-        (await assertCtx.GetBlockingLegacyIdsAsync<TempBasalEntity>([LegacyTreatmentId])).Should().BeEmpty();
+        (await assertCtx.GetBlockingLegacyIdsAsync<BolusEntity>([LegacyTreatmentId])).Held.Should().BeEmpty();
+        (await assertCtx.GetBlockingLegacyIdsAsync<TempBasalEntity>([LegacyTreatmentId])).Held.Should().BeEmpty();
         (await assertCtx.MutationAuditLog.AnyAsync()).Should().BeFalse();
     }
 }

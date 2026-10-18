@@ -17,14 +17,13 @@ namespace Nocturne.Infrastructure.Data.Repositories.V4;
 
 /// <summary>
 /// Repository for managing device event records in the database. A DeduplicationService participant on
-/// top of the keyed delete of <see cref="SyncKeyedRepositoryBase{TModel,TEntity}"/>, so it keeps only
+/// top of the sync-key upsert of <see cref="SyncUpsertRepositoryBase{TModel,TEntity}"/>, so it keeps only
 /// the extended <c>GetAsync</c> (non-primary LinkedRecords filter), the read-visibility filter behind
 /// <c>CountAsync</c>, the post-commit dedup linking, and the event-type query helpers.
 /// </summary>
-public class DeviceEventRepository : SyncKeyedRepositoryBase<DeviceEvent, DeviceEventEntity>, IDeviceEventRepository
+public class DeviceEventRepository : SyncUpsertRepositoryBase<DeviceEvent, DeviceEventEntity>, IDeviceEventRepository
 {
     private readonly IDeduplicationService _deduplicationService;
-    private readonly ILogger<DeviceEventRepository> _logger;
     private readonly IDeviceEventReactor? _reactor;
 
     /// <summary>
@@ -35,8 +34,8 @@ public class DeviceEventRepository : SyncKeyedRepositoryBase<DeviceEvent, Device
     /// <param name="auditContext">The audit context for tracking mutations.</param>
     /// <param name="logger">The logger instance.</param>
     /// <param name="broadcaster">Optional realtime broadcaster for native V4 record shapes.</param>
-    /// <param name="reactor">Optional domain reaction to live creates — the tracker trigger. Null when
-    /// the repository is constructed without DI, in which case creates simply run no reaction.</param>
+    /// <param name="reactor">Optional domain reaction to live creates and deletes — the tracker trigger.
+    /// Null when the repository is constructed without DI, in which case writes simply run no reaction.</param>
     public DeviceEventRepository(
         ITenantDbContextFactory contextFactory,
         IDeduplicationService deduplicationService,
@@ -44,10 +43,9 @@ public class DeviceEventRepository : SyncKeyedRepositoryBase<DeviceEvent, Device
         ILogger<DeviceEventRepository> logger,
         IV4RecordBroadcaster<DeviceEvent>? broadcaster = null,
         IDeviceEventReactor? reactor = null)
-        : base(contextFactory, auditContext, broadcaster)
+        : base(contextFactory, auditContext, logger, broadcaster)
     {
         _deduplicationService = deduplicationService;
-        _logger = logger;
         _reactor = reactor;
     }
 
@@ -69,8 +67,62 @@ public class DeviceEventRepository : SyncKeyedRepositoryBase<DeviceEvent, Device
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogError(ex, "Device event reaction failed for {Count} created event(s)", created.Count);
+            Logger.LogError(ex, "Device event reaction failed for {Count} created event(s)", created.Count);
         }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>Failures are swallowed for the reason <see cref="OnLiveCreatedAsync"/> gives.</remarks>
+    protected override async Task OnLiveDeletedAsync(IReadOnlyList<DeviceEvent> deleted, CancellationToken ct)
+    {
+        if (_reactor is null)
+            return;
+
+        try
+        {
+            await _reactor.OnDeletedAsync(deleted, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logger.LogError(ex, "Device event reaction failed for {Count} deleted event(s)", deleted.Count);
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<int> WithdrawBySyncIdentifierAsync(
+        string dataSource, string syncIdentifier, WriteOrigin origin, CancellationToken ct = default)
+    {
+        await using var ctx = await ContextFactory.CreateAsync(ct);
+        return await AuditedSoftDeleteAndBroadcastAsync(
+            ctx,
+            ctx.DeviceEvents.Where(e => e.DataSource == dataSource && e.SyncIdentifier == syncIdentifier),
+            $"sync_identifier={dataSource}/{syncIdentifier}", DuplicateDelete.PromoteSurvivor, origin, ct);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<DeviceEvent>> GetAllCopiesAsync(
+        DateTime from, DateTime to, IReadOnlyCollection<DeviceEventType> eventTypes, CancellationToken ct = default)
+    {
+        var typeNames = eventTypes.Select(t => t.ToString()).ToList();
+        await using var ctx = await ContextFactory.CreateAsync(ct);
+        var entities = await ctx.DeviceEvents.AsNoTracking()
+            .Where(e => e.Timestamp >= from && e.Timestamp < to && typeNames.Contains(e.EventType))
+            .OrderBy(e => e.Timestamp)
+            .ToListAsync(ct);
+        return entities.Select(DeviceEventMapper.ToDomainModel).ToList();
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<DeviceEvent>> GetUserDeletedAsync(
+        DateTime from, DateTime to, IReadOnlyCollection<DeviceEventType> eventTypes, CancellationToken ct = default)
+    {
+        var typeNames = eventTypes.Select(t => t.ToString()).ToList();
+        await using var ctx = await ContextFactory.CreateAsync(ct);
+        var entities = await ctx.UserTombstones<DeviceEventEntity>()
+            .Where(e => e.Timestamp >= from && e.Timestamp < to && typeNames.Contains(e.EventType))
+            .OrderBy(e => e.Timestamp)
+            .ToListAsync(ct);
+        return entities.Select(DeviceEventMapper.ToDomainModel).ToList();
     }
 
     /// <inheritdoc />
@@ -186,7 +238,7 @@ public class DeviceEventRepository : SyncKeyedRepositoryBase<DeviceEvent, Device
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "Failed to deduplicate {Type} batch of {Count}", "DeviceEvent", inserted.Count);
+            Logger.LogWarning(ex, "Failed to deduplicate {Type} batch of {Count}", "DeviceEvent", inserted.Count);
         }
     }
 

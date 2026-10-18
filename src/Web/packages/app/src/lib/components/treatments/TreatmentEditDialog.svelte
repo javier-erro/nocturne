@@ -1,17 +1,12 @@
 <script lang="ts">
+  import { uniqueBy } from "$lib/utils/collections";
   import type {
-    Bolus,
-    CarbIntake,
-    BGCheck,
-    Note,
-    DeviceEvent,
     BolusType,
     GlucoseType,
     GlucoseUnit,
     DeviceEventType,
     PatientInsulin,
     InsulinFormulation,
-    BasalInjection,
     CreateBasalInjectionRequest,
   } from "$lib/api";
   import { InsulinCategory as InsulinCategoryEnum } from "$lib/api";
@@ -32,16 +27,15 @@
   import { Input } from "$lib/components/ui/input";
   import { Label } from "$lib/components/ui/label";
   import { Badge } from "$lib/components/ui/badge";
-  import {
-    Syringe,
-    Apple,
-    Droplet,
-    FileText,
-    Smartphone,
-    Clock,
-    Database,
-    Trash2,
-  } from "lucide-svelte";
+  import Syringe from "@lucide/svelte/icons/syringe";
+  import Apple from "@lucide/svelte/icons/apple";
+  import Droplet from "@lucide/svelte/icons/droplet";
+  import FileText from "@lucide/svelte/icons/file-text";
+  import Smartphone from "@lucide/svelte/icons/smartphone";
+  import Clock from "@lucide/svelte/icons/clock";
+  import Database from "@lucide/svelte/icons/database";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
+  import WandSparkles from "@lucide/svelte/icons/wand-sparkles";
   import { formatDateForInput, formatDateTimeCompact } from "$lib/utils/formatting";
   import * as patientRemote from "$api/generated/patientRecords.generated.remote";
   import { getCatalog } from "$api/generated/insulinCatalogs.generated.remote";
@@ -98,7 +92,7 @@
 
   // When the record prop changes (new dialog open), clear the override
   $effect(() => {
-    record; // track the prop
+    void record; // track the prop
     overrideRecord = null;
   });
 
@@ -106,28 +100,52 @@
   let activeRecord = $derived(overrideRecord ?? record);
 
   // Form states per kind
-  let bolusForm = $state({
-    insulin: 0 as number,
-    bolusType: undefined as BolusType | undefined,
-    programmed: undefined as number | undefined,
-    delivered: undefined as number | undefined,
-    duration: undefined as number | undefined,
+  interface BolusForm {
+    insulin: number;
+    bolusType: BolusType | undefined;
+    programmed: number | undefined;
+    delivered: number | undefined;
+    duration: number | undefined;
+    automatic: boolean;
+    insulinType: string;
+    patientInsulinId: string | undefined;
+    isBasalInsulin: boolean;
+  }
+
+  let bolusForm = $state<BolusForm>({
+    insulin: 0,
+    bolusType: undefined,
+    programmed: undefined,
+    delivered: undefined,
+    duration: undefined,
     automatic: false,
     insulinType: "",
-    patientInsulinId: undefined as string | undefined,
+    patientInsulinId: undefined,
     isBasalInsulin: false,
   });
 
-  let carbsForm = $state({
-    carbs: 0 as number,
-    absorptionTime: undefined as number | undefined,
-    carbTime: undefined as number | undefined,
+  interface CarbsForm {
+    carbs: number;
+    absorptionTime: number | undefined;
+    carbTime: number | undefined;
+  }
+
+  let carbsForm = $state<CarbsForm>({
+    carbs: 0,
+    absorptionTime: undefined,
+    carbTime: undefined,
   });
 
-  let bgCheckForm = $state({
-    glucose: 0 as number,
-    glucoseType: undefined as GlucoseType | undefined,
-    units: undefined as GlucoseUnit | undefined,
+  interface BGCheckForm {
+    glucose: number;
+    glucoseType: GlucoseType | undefined;
+    units: GlucoseUnit | undefined;
+  }
+
+  let bgCheckForm = $state<BGCheckForm>({
+    glucose: 0,
+    glucoseType: undefined,
+    units: undefined,
   });
 
   let noteForm = $state({
@@ -136,8 +154,8 @@
     isAnnouncement: false,
   });
 
-  let deviceEventForm = $state({
-    eventType: undefined as DeviceEventType | undefined,
+  let deviceEventForm = $state<{ eventType: DeviceEventType | undefined; notes: string }>({
+    eventType: undefined,
     notes: "",
   });
 
@@ -149,11 +167,11 @@
 
   // Load patient insulins for the dropdown
   const insulinsResource = patientRemote.getInsulins();
-  let patientInsulins = $derived((insulinsResource.current ?? []) as PatientInsulin[]);
+  let patientInsulins = $derived<PatientInsulin[]>(insulinsResource.current ?? []);
 
   // Load insulin catalog for "add new" form
   const catalogResource = getCatalog(undefined);
-  let catalog = $derived((catalogResource.current ?? []) as InsulinFormulation[]);
+  let catalog = $derived<InsulinFormulation[]>(catalogResource.current ?? []);
 
   // Inline "add new insulin" state
   let showAddInsulin = $state(false);
@@ -206,6 +224,10 @@
   }
 
   const addInsulinForm = patientRemote.createInsulin;
+
+  function isBasalFlag(value: unknown): boolean {
+    return typeof value === "boolean" ? value : false;
+  }
   let addSaving = $derived(!!addInsulinForm.pending);
 
   // Common timestamp field (mills)
@@ -228,7 +250,7 @@
           automatic: d.automatic ?? false,
           insulinType: d.insulinType ?? "",
           patientInsulinId: d.insulinContext?.patientInsulinId ?? undefined,
-          isBasalInsulin: (d.additionalProperties?.["isBasalInsulin"] as boolean) ?? false,
+          isBasalInsulin: isBasalFlag(d.additionalProperties?.["isBasalInsulin"]),
         };
         break;
       }
@@ -294,15 +316,7 @@
   // Correlation group: all records sharing the same correlationId
   let correlationGroup = $derived.by(() => {
     if (!record) return [];
-    const all = [record, ...correlatedRecords];
-    // Deduplicate by id
-    const seen = new Set<string>();
-    return all.filter((r) => {
-      const id = r.data.id;
-      if (!id || seen.has(id)) return false;
-      seen.add(id);
-      return true;
-    });
+    return uniqueBy([record, ...correlatedRecords], (r) => r.data.id || null);
   });
 
   // Icon per kind
@@ -332,57 +346,38 @@
   function handleSubmit() {
     if (!activeRecord) return;
 
-    const baseData = {
-      ...activeRecord.data,
-      mills: editMills,
-    };
-
+    const mills = editMills;
     let updated: EntryRecord;
 
     switch (activeRecord.kind) {
       case "bolus":
         updated = {
           kind: "bolus",
-          data: {
-            ...baseData,
-            ...bolusForm,
-          } as Bolus,
+          data: { ...activeRecord.data, mills, ...bolusForm },
         };
         break;
       case "carbs":
         updated = {
           kind: "carbs",
-          data: {
-            ...baseData,
-            ...carbsForm,
-          } as CarbIntake,
+          data: { ...activeRecord.data, mills, ...carbsForm },
         };
         break;
       case "bgCheck":
         updated = {
           kind: "bgCheck",
-          data: {
-            ...baseData,
-            ...bgCheckForm,
-          } as BGCheck,
+          data: { ...activeRecord.data, mills, ...bgCheckForm },
         };
         break;
       case "note":
         updated = {
           kind: "note",
-          data: {
-            ...baseData,
-            ...noteForm,
-          } as Note,
+          data: { ...activeRecord.data, mills, ...noteForm },
         };
         break;
       case "deviceEvent":
         updated = {
           kind: "deviceEvent",
-          data: {
-            ...baseData,
-            ...deviceEventForm,
-          } as DeviceEvent,
+          data: { ...activeRecord.data, mills, ...deviceEventForm },
         };
         break;
       case "basalInjection": {
@@ -403,11 +398,12 @@
         updated = {
           kind: "basalInjection",
           data: {
-            ...baseData,
+            ...activeRecord.data,
+            mills,
             units: basalInjectionForm.units ?? activeRecord.data.units,
             notes: basalInjectionForm.notes ?? "",
             insulinContext: nextContext,
-          } as BasalInjection,
+          },
         };
         break;
       }
@@ -434,7 +430,7 @@
   <Sheet.Root bind:open onOpenChange={(o) => !o && onClose()}>
     <Sheet.Content
       side="bottom"
-      class="max-h-[90vh] overflow-y-auto rounded-t-xl p-6"
+      class="max-h-[90vh] overflow-y-auto p-6"
     >
       {@render dialogBody()}
     </Sheet.Content>
@@ -451,10 +447,7 @@
     {#if activeRecord && activeCategory && activeStyle && ActiveKindIcon}
       <Dialog.Header>
         <Dialog.Title class="flex items-center gap-2">
-          <Badge
-            variant="outline"
-            class="{activeStyle.colorClass} {activeStyle.bgClass} {activeStyle.borderClass}"
-          >
+          <Badge variant={activeStyle.badge}>
             <ActiveKindIcon class="mr-1 h-3.5 w-3.5" />
             {activeCategory.name}
           </Badge>
@@ -526,6 +519,22 @@
         {:else if activeRecord.kind === "note"}
           <NoteFormFields bind:form={noteForm} />
         {:else if activeRecord.kind === "deviceEvent"}
+          {#if activeRecord.data.isInferred}
+            <div
+              data-testid="inferred-device-event"
+              class="flex gap-2 rounded-lg border border-dashed p-3 text-sm text-muted-foreground"
+            >
+              <WandSparkles class="mt-0.5 h-4 w-4 shrink-0" />
+              <div class="space-y-1">
+                <Badge variant="outline">Inferred</Badge>
+                <p>
+                  Nocturne inferred this sensor start from the warm-up gap in your CGM's
+                  readings. Correct the time if it is off, or delete it if this was not a
+                  sensor change.
+                </p>
+              </div>
+            </div>
+          {/if}
           <DeviceEventFormFields bind:form={deviceEventForm} />
         {:else if activeRecord.kind === "basalInjection"}
           <BasalInjectionFormFields
@@ -578,7 +587,7 @@
           {...addInsulinForm.enhance(async ({ submit }) => {
             await submit();
             if (addInsulinForm.result) {
-              const created = addInsulinForm.result as PatientInsulin;
+              const created: PatientInsulin = addInsulinForm.result;
               if (created?.id) {
                 bolusForm.patientInsulinId = created.id;
                 bolusForm.insulinType = created.name ?? "";

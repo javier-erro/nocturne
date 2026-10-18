@@ -7,49 +7,44 @@
   const realtimeStore = getRealtimeStore();
 
   // Reactive state from realtime store
-  const connectionStatus = $derived(realtimeStore.connectionStatus);
-  const isConnected = $derived(realtimeStore.isConnected);
-  const connectionError = $derived(realtimeStore.connectionError);
+  const connection = $derived(realtimeStore.connectionPresentation);
+  const isConnected = $derived(connection === "live");
+  const connectionError = $derived(
+    connection === "unavailable" ? realtimeStore.connectionError : null
+  );
   const stats = $derived(realtimeStore.connectionStats);
   const timeSinceUpdate = $derived(realtimeStore.timeSinceUpdate);
 
   // Connection status styling
   const statusConfig = $derived.by(() => {
-    switch (connectionStatus) {
-      case "connected":
+    switch (connection) {
+      case "live":
         return {
           variant: "default" as const,
-          color: "bg-green-500",
+          color: "bg-success",
           text: "Connected",
           description: "Real-time data active",
         };
-      case "connecting":
+      case "pending":
         return {
           variant: "secondary" as const,
-          color: "bg-yellow-500",
+          color: "bg-warning",
           text: "Connecting...",
           description: "Establishing connection",
         };
-      case "reconnecting":
-        return {
-          variant: "secondary" as const,
-          color: "bg-orange-500",
-          text: "Reconnecting...",
-          description: "Attempting to reconnect",
-        };
-      case "disconnected":
+      case "denied":
         return {
           variant: "outline" as const,
           color: "bg-gray-500",
-          text: "Disconnected",
-          description: "Using cached data",
+          text: "Not available",
+          description: "Live updates are not permitted for this view",
         };
-      case "error":
+      case "unavailable":
         return {
           variant: "destructive" as const,
-          color: "bg-red-500",
-          text: "Error",
-          description: connectionError?.message || "Connection failed",
+          color: "bg-destructive",
+          text: "Disconnected",
+          description: connectionError?.message || "Using cached data",
         };
     }
   });
@@ -78,17 +73,16 @@
   <div class="flex items-center justify-between space-x-2">
     <div class="flex items-center space-x-2">
       <div class="w-2 h-2 rounded-full {statusConfig.color}"></div>
-      <Badge variant={statusConfig.variant} class="text-xs">
+      <Badge variant={statusConfig.variant}>
         {statusConfig.text}
       </Badge>
     </div>
 
-    {#if !isConnected}
+    {#if connection === "unavailable"}
       <Button
         variant="outline"
-        size="sm"
+        size="xs"
         onclick={handleReconnect}
-        class="h-6 px-2 text-xs"
       >
         Retry
       </Button>

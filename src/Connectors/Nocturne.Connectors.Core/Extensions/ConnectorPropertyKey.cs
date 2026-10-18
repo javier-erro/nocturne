@@ -51,6 +51,7 @@ public enum ConnectorPropertyKey
 
     // Nightscout-specific
     Url,
+    RealtimeUrl,
     ApiSecret,
     MaxCount,
 
@@ -92,4 +93,20 @@ public enum ConnectorPropertyKey
     PumpSerialNumber,
     FetchAllEventTypes,
     IgnoreZeroUnitBasal,
+
+    // Glooko-specific (appended so earlier members keep their values)
+    AutoClockCorrection,
+
+    // Google Health-specific (appended so earlier members keep their values)
+    ClientId,
+    ClientSecret,
+    CallbackUrl,
+    ImportFrom,
+    PreviewOnly,
+    GrantedScopes,
+    SyncSteps,
+    SyncHeartRate,
+    SyncBodyWeight,
+    SyncSleep,
+
 }

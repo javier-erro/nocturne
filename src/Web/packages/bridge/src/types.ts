@@ -1,4 +1,3 @@
-import { Server as HttpServer } from 'http';
 import { Server as SocketIOServerClass } from 'socket.io';
 
 export interface BridgeConfig {
@@ -6,6 +5,7 @@ export interface BridgeConfig {
     hubUrl: string;
     alarmHubUrl?: string;
     configHubUrl?: string;
+    /** @deprecated The bridge retries indefinitely with maxReconnectDelay as the backoff cap. */
     reconnectAttempts?: number;
     reconnectDelay?: number;
     maxReconnectDelay?: number;
@@ -80,9 +80,13 @@ export interface ClientInfo {
   userAgent: string | undefined;
 }
 
+/** The Socket.IO event an alarm goes out as, named by the SignalR event it arrived on. */
+export type AlarmEvent = 'alarm' | 'urgent_alarm';
+
+/** An alarm as the bridge relays it: every field passes through from the API. */
 export interface AlarmData {
-  level: string;
-  [key: string]: any;
+  level?: unknown;
+  [key: string]: unknown;
 }
 
 export interface ServerStats {

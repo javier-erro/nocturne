@@ -18,7 +18,7 @@ public interface ICalibrationRepository : ILegacyKeyedRepository<Calibration>
 {
     /// <summary>Retrieve a page of <see cref="Calibration"/> records filtered by time range, device, and source.</summary>
     /// <param name="from">Inclusive start of the time window, or <c>null</c> for no lower bound.</param>
-    /// <param name="to">Exclusive end of the time window, or <c>null</c> for no upper bound.</param>
+    /// <param name="to">Inclusive end of the time window, or <c>null</c> for no upper bound.</param>
     /// <param name="device">Optional device identifier filter.</param>
     /// <param name="source">Optional data source filter.</param>
     /// <param name="limit">Maximum number of records to return (default 100).</param>
@@ -26,6 +26,17 @@ public interface ICalibrationRepository : ILegacyKeyedRepository<Calibration>
     /// <param name="descending">When <c>true</c>, results are ordered newest-first (default).</param>
     /// <param name="ct">Cancellation token.</param>
     new Task<IEnumerable<Calibration>> GetAsync(DateTime? from, DateTime? to, string? device, string? source, int limit = 100, int offset = 0, bool descending = true, CancellationToken ct = default);
+
+    /// <summary>
+    /// Upload duplicate probe: the newest stored <see cref="Calibration"/> from the device in
+    /// <paramref name="from"/>..<paramref name="to"/>, or <c>null</c>.
+    /// </summary>
+    /// <param name="device">Device identifier to match, or <c>null</c> for any device.</param>
+    /// <param name="from">Inclusive start of the time range.</param>
+    /// <param name="to">Exclusive end of the time range.</param>
+    /// <param name="ct">Cancellation token.</param>
+    Task<Calibration?> FindStoredDuplicateAsync(
+        string? device, DateTime from, DateTime to, CancellationToken ct = default);
 
     /// <summary>Retrieve all <see cref="Calibration"/> records sharing the same correlation identifier.</summary>
     /// <param name="correlationId">Correlation ID linking related records.</param>
@@ -60,7 +71,7 @@ public interface ICalibrationRepository : ILegacyKeyedRepository<Calibration>
     /// Delete all records within the given time range.
     /// </summary>
     /// <param name="from">Inclusive start, or <c>null</c> for no lower bound.</param>
-    /// <param name="to">Exclusive end, or <c>null</c> for no upper bound.</param>
+    /// <param name="to">Inclusive end, or <c>null</c> for no upper bound.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>Number of records deleted.</returns>
     Task<int> DeleteByTimeRangeAsync(DateTime? from, DateTime? to, CancellationToken ct = default);

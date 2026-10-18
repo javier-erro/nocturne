@@ -25,7 +25,7 @@ public interface ISensorGlucoseRepository
     /// Retrieve a page of <see cref="SensorGlucose"/> records filtered by time range, device, source, and origin.
     /// </summary>
     /// <param name="from">Inclusive start of the time window, or <c>null</c> for no lower bound.</param>
-    /// <param name="to">Exclusive end of the time window, or <c>null</c> for no upper bound.</param>
+    /// <param name="to">Inclusive end of the time window, or <c>null</c> for no upper bound.</param>
     /// <param name="device">Optional device identifier filter.</param>
     /// <param name="source">Optional data source filter (e.g., connector name).</param>
     /// <param name="limit">Maximum number of records to return (default 100).</param>
@@ -52,6 +52,16 @@ public interface ISensorGlucoseRepository
         Guid? patientDeviceId = null
     );
 
+    /// <summary>
+    /// Partial readings for statistics and canonical selection only; these must not be returned
+    /// as raw records or projected into legacy entries. Includes the per-reading UTC offset.
+    /// </summary>
+    Task<IEnumerable<SensorGlucose>> GetForAnalyticsAsync(
+        DateTime? from, DateTime? to, string? device, string? source,
+        int limit = 100, int offset = 0, bool descending = true, bool nativeOnly = false,
+        DateTime? afterTimestamp = null, Guid? afterId = null,
+        CancellationToken ct = default, Guid? patientDeviceId = null);
+
     // Explicit base-interface bridge — delegates to the extended overload
     Task<IEnumerable<SensorGlucose>> IV4Repository<SensorGlucose>.GetAsync(
         DateTime? from, DateTime? to, string? device, string? source,
@@ -67,8 +77,8 @@ public interface ISensorGlucoseRepository
     );
 
     /// <summary>
-    /// Raw-storage duplicate probe for upload idempotency: returns a stored reading matching the
-    /// device, value (±0.01 mg/dL), and time window, or <c>null</c>.
+    /// Raw-storage duplicate probe for upload idempotency: returns the newest stored reading from
+    /// the device in <paramref name="from"/>..<paramref name="to"/>, or <c>null</c>.
     /// </summary>
     /// <remarks>
     /// Unlike <see cref="GetAsync(DateTime?, DateTime?, string?, string?, int, int, bool, bool, DateTime?, Guid?, CancellationToken, Guid?)"/>,
@@ -78,12 +88,11 @@ public interface ISensorGlucoseRepository
     /// same readings are re-inserted on every upload cycle.
     /// </remarks>
     /// <param name="device">Optional device identifier filter.</param>
-    /// <param name="mgdl">Optional glucose value to match within ±0.01 mg/dL.</param>
-    /// <param name="from">Inclusive start of the time window.</param>
-    /// <param name="to">Inclusive end of the time window.</param>
+    /// <param name="from">Inclusive start of the time range.</param>
+    /// <param name="to">Exclusive end of the time range.</param>
     /// <param name="ct">Cancellation token.</param>
     Task<SensorGlucose?> FindStoredDuplicateAsync(
-        string? device, double? mgdl, DateTime from, DateTime to, CancellationToken ct = default);
+        string? device, DateTime from, DateTime to, CancellationToken ct = default);
 
     /// <summary>
     /// Raw-storage duplicate probe for a whole upload batch: returns the stored readings in
@@ -92,16 +101,16 @@ public interface ISensorGlucoseRepository
     /// </summary>
     /// <remarks>
     /// Same raw semantics as
-    /// <see cref="FindStoredDuplicateAsync(string?, double?, DateTime, DateTime, CancellationToken)"/> —
+    /// <see cref="FindStoredDuplicateAsync(string?, DateTime, DateTime, CancellationToken)"/>:
     /// non-primary duplicate copies are included, and the ordering (timestamp then id, both
     /// descending) is the one the single-entry probe resolves ties by, so scanning the returned
     /// list in order and taking the first match reproduces its result exactly.
     /// </remarks>
     /// <param name="devices">Device identifiers to include, or <c>null</c> for every device
     /// (required when any submitted entry has no device, since such an entry matches any).</param>
-    /// <param name="from">Inclusive start of the time window.</param>
-    /// <param name="to">Inclusive end of the time window.</param>
-    /// <param name="limit">Maximum rows to return. A caller that needs to know whether the window
+    /// <param name="from">Inclusive start of the time range.</param>
+    /// <param name="to">Exclusive end of the time range.</param>
+    /// <param name="limit">Maximum rows to return. A caller that needs to know whether the range
     /// held more than it can use should ask for one row more than that.</param>
     /// <param name="ct">Cancellation token.</param>
     Task<IReadOnlyList<SensorGlucose>> FindStoredDuplicateCandidatesAsync(
@@ -144,8 +153,18 @@ public interface ISensorGlucoseRepository
     /// Delete all records within the given time range.
     /// </summary>
     /// <param name="from">Inclusive start, or <c>null</c> for no lower bound.</param>
-    /// <param name="to">Exclusive end, or <c>null</c> for no upper bound.</param>
+    /// <param name="to">Inclusive end, or <c>null</c> for no upper bound.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>Number of records deleted.</returns>
     Task<int> DeleteByTimeRangeAsync(DateTime? from, DateTime? to, CancellationToken ct = default);
+
+    /// <summary>
+    /// Every live reading attributed to <paramref name="patientDeviceId"/> in [<paramref name="from"/>,
+    /// <paramref name="to"/>], oldest first, carrying only <see cref="V4RecordBase.Timestamp"/> and
+    /// <see cref="V4RecordBase.UtcOffset"/>. Unlike the other reads it includes the copies
+    /// deduplication hides behind another source's primary: the attributed copy of a reading need not
+    /// be the one that is shown, and the device's own series must not lose it.
+    /// </summary>
+    Task<IReadOnlyList<SensorGlucose>> GetAttributedReadingTimesAsync(
+        Guid patientDeviceId, DateTime from, DateTime to, CancellationToken ct = default);
 }

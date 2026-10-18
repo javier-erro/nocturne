@@ -31,7 +31,7 @@ public class ApsSnapshotRepository : SyncUpsertRepositoryBase<ApsSnapshot, ApsSn
         IAuditContext auditContext,
         ILogger<ApsSnapshotRepository> logger,
         IV4RecordBroadcaster<ApsSnapshot>? broadcaster = null)
-        : base(contextFactory, auditContext, broadcaster)
+        : base(contextFactory, auditContext, logger, broadcaster)
     {
     }
 
@@ -57,6 +57,13 @@ public class ApsSnapshotRepository : SyncUpsertRepositoryBase<ApsSnapshot, ApsSn
             .ToListAsync(ct);
     }
 
+    /// <inheritdoc />
+    public async Task<int> CountAsync(DateTime? from, DateTime? to, string? device, CancellationToken ct = default)
+    {
+        await using var ctx = await ContextFactory.CreateAsync(ct);
+        return await InWindow(ctx.ApsSnapshots.AsNoTracking(), from, to, device).CountAsync(ct);
+    }
+
     /// <summary>
     /// Gets APS snapshots by correlation IDs.
     /// </summary>
@@ -73,35 +80,6 @@ public class ApsSnapshotRepository : SyncUpsertRepositoryBase<ApsSnapshot, ApsSn
         var entities = await ctx.ApsSnapshots
             .AsNoTracking()
             .Where(e => e.CorrelationId != null && ids.Contains(e.CorrelationId.Value))
-            .ToListAsync(ct);
-
-        return entities.Select(ApsSnapshotMapper.ToDomainModel);
-    }
-
-    /// <summary>
-    /// Gets APS snapshots modified since the given timestamp, ordered oldest-first.
-    /// </summary>
-    /// <param name="lastModifiedMills">Unix millisecond timestamp threshold.</param>
-    /// <param name="limit">Maximum number of records to return.</param>
-    /// <param name="ct">The cancellation token.</param>
-    /// <returns>Matching APS snapshots ordered by modification time ascending.</returns>
-    public async Task<IEnumerable<ApsSnapshot>> GetModifiedSinceAsync(
-        long lastModifiedMills, int limit = 1000, CancellationToken ct = default)
-    {
-        await using var ctx = await ContextFactory.CreateAsync(ct);
-        var since = DateTimeOffset.FromUnixTimeMilliseconds(lastModifiedMills).UtcDateTime;
-        // Filter and order on the event Timestamp: it is the clock the V3 devicestatus DTO
-        // reports as srvModified and the AAPS history cursor advances on, and it is the
-        // indexed column. Filtering on the write clock (SysUpdatedAt) instead sets the cursor
-        // below the returned rows' write time, so every poll re-matches them (an incremental-
-        // sync loop). Strictly-greater (not >=) so the cursor record AAPS already holds is not
-        // re-returned; the boundary record's sub-millisecond remainder is deduplicated by AAPS
-        // rather than dropped (a >= cursor+1ms bound would silently skip sub-ms page splits).
-        var entities = await ctx.ApsSnapshots
-            .AsNoTracking()
-            .Where(e => e.Timestamp > since)
-            .OrderBy(e => e.Timestamp)
-            .Take(limit)
             .ToListAsync(ct);
 
         return entities.Select(ApsSnapshotMapper.ToDomainModel);

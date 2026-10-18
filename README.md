@@ -71,7 +71,9 @@ Aspire will automatically:
 - Launch any configured data connectors
 - Set up service discovery, health checks, and a YARP gateway
 
-Once running, open the Aspire dashboard link from the console output to see all services. Access the app at `https://nocturne.localhost:1612`.
+Once running, access the app at `https://nocturne.localhost:1612`. `aspire describe` lists the services and `aspire logs <resource>` tails one. The Aspire dashboard is off by default; start with `Aspire__OptionalServices__AspireDashboard__Enabled=true aspire start` (or set `Aspire:OptionalServices:AspireDashboard:Enabled` in the AppHost appsettings) to get it.
+
+If .NET is installed outside the default location (e.g. Homebrew), set `DOTNET_ROOT` to the directory holding the real `dotnet` binary before `aspire start` (Homebrew: `export DOTNET_ROOT="$(brew --prefix dotnet)/libexec"`).
 
 In run mode the AppHost pins two host ports (main checkout; worktrees stay dynamic):
 
@@ -148,7 +150,7 @@ declared proxy vouched for — but only from those ranges, so nobody else can cl
 they aren't. This works for any CDN, not just Cloudflare. Leave it alone if no CDN is in front, and
 never set it empty: an empty value is a Caddy startup error, not a way to turn the feature off.
 
-The production compose includes [Watchtower](https://github.com/nicholas-fedor/watchtower) for automatic container updates (checks daily), and omits the Aspire dashboard and Scalar API explorer. Watchtower will automatically pull new images as they are published — no manual updates needed. It runs in label-only mode and every service in the bundle carries `com.centurylinklabs.watchtower.enable=true`, so it only ever updates Nocturne's own containers — anything else on the same Docker host is left alone.
+The production compose includes [Watchtower](https://github.com/nicholas-fedor/watchtower) for automatic container updates (checks daily), and omits the Aspire dashboard and Scalar API explorer. Watchtower will automatically pull new images as they are published. It runs in label-only mode and every service in the bundle carries a `com.centurylinklabs.watchtower.enable` label, so it only ever updates Nocturne's own containers and leaves anything else on the same Docker host alone. Caddy and Postgres carry `false`: they take their config from Compose, which Watchtower does not carry across a recreate. Update them with `docker compose pull && docker compose up -d`. An install from before this change still has `true` on `caddy`: set the label to `false` there, or download the new bundle, then run `docker compose up -d` to recreate it.
 
 ### First-run setup
 
@@ -214,14 +216,14 @@ For bring-your-own PostgreSQL (not using the bundled container), run `docs/postg
 ### Running Tests
 
 ```bash
-# Run every collected test (the opt-in E2E suite stays out)
+# Run every collected .NET test
 dotnet test
 
 # Run unit tests only
-dotnet test --filter "Category!=Integration&Category!=Performance&Category!=E2E"
+dotnet test --filter "Category!=Integration&Category!=Performance"
 
-# Run the end-to-end suite (stands up the whole Aspire stack)
-dotnet test tests/E2E/Nocturne.E2E.Tests -p:RunE2E=true
+# Run the end-to-end suite (production images in docker compose; see tests/README.md)
+cd e2e && pnpm install && pnpm e2e
 
 # Run with coverage
 dotnet test --collect:"XPlat Code Coverage"
@@ -231,12 +233,13 @@ dotnet test --collect:"XPlat Code Coverage"
 
 ```bash
 # Create a new migration
-cd src/Infrastructure/Nocturne.Infrastructure.Data
-dotnet ef migrations add YourMigrationName
+dotnet ef migrations add YourMigrationName -p src/Infrastructure/Nocturne.Infrastructure.Data.Migrations -s src/API/Nocturne.API
 
 # Apply migrations
-dotnet ef database update
+dotnet ef database update -p src/Infrastructure/Nocturne.Infrastructure.Data.Migrations -s src/API/Nocturne.API
 ```
+
+The API loads the migrations project at runtime and applies pending migrations on startup. `dotnet watch` does not see that project, so after adding a migration restart the API: `aspire resource nocturne-api restart`.
 
 ## API Documentation
 

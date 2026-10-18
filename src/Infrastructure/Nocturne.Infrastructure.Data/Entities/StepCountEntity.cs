@@ -14,9 +14,6 @@ public class StepCountEntity
     /// <summary>
     /// Identifier of the tenant this step count record belongs to
     /// </summary>
-    /// <summary>
-    /// The unique identifier of the tenant this record belongs to.
-    /// </summary>
     [Column("tenant_id")]
     public Guid TenantId { get; set; }
 
@@ -47,9 +44,16 @@ public class StepCountEntity
 
     /// <summary>
     /// Source bitmask. Bit 0 set indicates an absolute step count total; otherwise a delta.
+    /// Bit 1 set marks a metric that may be a running counter reading, which totals skip.
     /// </summary>
     [Column("source")]
     public int Source { get; set; }
+
+    /// <summary>
+    /// Legacy activity <c>type</c> as uploaded
+    /// </summary>
+    [Column("type")]
+    public string? Type { get; set; }
 
     /// <summary>
     /// Device identifier that recorded this reading

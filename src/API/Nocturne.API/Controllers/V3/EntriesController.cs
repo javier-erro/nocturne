@@ -165,7 +165,7 @@ public class EntriesController : BaseV3Controller<Entry>
 
         // Set appropriate headers
         Response.Headers["ETag"] = FormatCursorETag(entry.Mills);
-        Response.Headers["Cache-Control"] = "public, max-age=60";
+        Response.Headers["Cache-Control"] = "private, max-age=60";
 
         return Ok(entry.ToV3Response());
     }
@@ -177,9 +177,9 @@ public class EntriesController : BaseV3Controller<Entry>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The created <see cref="Entry"/> in V3 format.</returns>
     /// <remarks>
-    /// Supports AAPS deduplication: if an entry with the same device, type, SGV value,
-    /// and timestamp (within a 1-minute window) already exists, returns a 200 response
-    /// with <c>isDeduplication: true</c> instead of creating a duplicate.
+    /// Supports AAPS deduplication: if an entry with the same device, type and timestamp already
+    /// exists, returns a 200 response with <c>isDeduplication: true</c> instead of creating a
+    /// duplicate.
     /// After creation, alerts are evaluated via <see cref="IAlertOrchestrator"/> for the new reading.
     /// </remarks>
     /// <response code="201">Entry created successfully.</response>
@@ -218,10 +218,8 @@ public class EntriesController : BaseV3Controller<Entry>
                 var existingEntry = await _entryService.CheckForDuplicateEntryAsync(
                     entry.Device,
                     entry.Type ?? "sgv",
-                    entry.Sgv,
                     entry.Mills,
-                    windowMinutes: 1,
-                    cancellationToken: cancellationToken
+                    cancellationToken
                 );
                 if (existingEntry != null)
                 {
@@ -239,7 +237,7 @@ public class EntriesController : BaseV3Controller<Entry>
             }
 
             // Process the entry
-            var processedEntry = _documentProcessingService.ProcessEntry(entry); // Save to database
+            var processedEntry = WithIdentifier(_documentProcessingService.ProcessEntry(entry));
             var createdEntries = await _entryService.CreateEntriesAsync(
                 new[] { processedEntry },
                 cancellationToken: cancellationToken
@@ -320,7 +318,7 @@ public class EntriesController : BaseV3Controller<Entry>
 
             // Process all entries
             var processedEntries = entries
-                .Select(entry => _documentProcessingService.ProcessEntry(entry))
+                .Select(entry => WithIdentifier(_documentProcessingService.ProcessEntry(entry)))
                 .ToList();
 
             // Save to database
@@ -461,12 +459,12 @@ public class EntriesController : BaseV3Controller<Entry>
     /// </summary>
     /// <param name="id">Entry ID</param>
     /// <param name="cancellationToken">Cancellation token</param>
-    /// <returns>No content on success</returns>
+    /// <returns><c>{"status": 200}</c> on success</returns>
     [HttpDelete("{id}")]
     [Authorize]
     [RequireScope(Scope.GlucoseReadWrite)]
     [NightscoutEndpoint("/api/v3/entries/:id")]
-    [ProducesResponseType(204)]
+    [ProducesResponseType(200)]
     [ProducesResponseType(typeof(V3ErrorResponse), 404)]
     [ProducesResponseType(500)]
     [ErrorEnvelope]
@@ -490,7 +488,7 @@ public class EntriesController : BaseV3Controller<Entry>
 
         _logger.LogDebug("Successfully deleted V3 entry {Id}", id);
 
-        return NoContent();
+        return CreateV3DeleteResponse();
     }
 
     /// <summary>
@@ -522,144 +520,22 @@ public class EntriesController : BaseV3Controller<Entry>
 
         limit = Math.Min(Math.Max(limit, 1), 1000);
 
-        // Build a find query for entries strictly newer than the cursor. Strictly-greater
-        // (not $gte) so the cursor record AAPS already holds is not re-returned, which
-        // would otherwise loop the incremental sync.
-        var findQuery = $"{{\"date\":{{\"$gt\":{lastModified}}}}}";
-        // Page oldest-first (reverseResults: true -> ascending) so a backlog larger than one
-        // page advances the cursor forward record by record. Newest-first would set the
-        // cursor to the newest of the first page and skip every older unsynced entry.
-        var entries = (await _entryService.GetEntriesWithAdvancedFilterAsync(
-            type: null,
-            count: limit,
-            skip: 0,
-            findQuery: findQuery,
-            dateString: null,
-            reverseResults: true,
-            cancellationToken: cancellationToken
-        )).ToList();
+        var page = await _entryService.GetEntriesModifiedSinceAsync(
+            lastModified,
+            limit,
+            cancellationToken
+        );
 
-        if (entries.Count > 0)
+        if (page.CursorMills is { } cursor)
         {
-            SetHistoryCursorHeaders(entries.Max(e => e.Mills));
+            SetHistoryCursorHeaders(cursor);
         }
 
-        var v3Entries = entries.ToV3Responses().ToList();
+        var v3Entries = page.Records.ToV3Responses().ToList();
         return CreateV3SuccessResponse(v3Entries);
     }
 
     #region Helper Methods
-
-    private new string? ExtractTypeFromFilter(JsonElement? filter)
-    {
-        if (!filter.HasValue)
-            return null;
-
-        try
-        {
-            if (filter.Value.TryGetProperty("type", out var typeElement))
-            {
-                return typeElement.GetString();
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to extract type from V3 filter");
-        }
-
-        return null;
-    }
-
-    private new string? ConvertV3FilterToV1Find(JsonElement? filter)
-    {
-        if (!filter.HasValue)
-            return null;
-
-        try
-        {
-            // Convert V3 JSON filter to V1 query string format
-            // This is a simplified conversion - full implementation would need more sophisticated mapping
-            var filterObj = filter.Value;
-            var queryParts = new List<string>();
-
-            foreach (var property in filterObj.EnumerateObject())
-            {
-                if (property.Name == "type")
-                    continue; // Handled separately
-
-                var value = property.Value;
-                if (value.ValueKind == JsonValueKind.Object)
-                {
-                    // Handle operators like $gte, $lte, etc.
-                    foreach (var op in value.EnumerateObject())
-                    {
-                        queryParts.Add($"find[{property.Name}][{op.Name}]={op.Value}");
-                    }
-                }
-                else
-                {
-                    // Simple equality
-                    queryParts.Add($"find[{property.Name}]={value}");
-                }
-            }
-
-            return queryParts.Count > 0 ? string.Join("&", queryParts) : null;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to convert V3 filter to V1 find query");
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Convert V3 filter criteria (field$op=value format) to MongoDB-style JSON query
-    /// </summary>
-    /// <param name="filterCriteria">List of parsed filter criteria</param>
-    /// <returns>MongoDB-style JSON query string, or null if no criteria</returns>
-    private string? ConvertFilterCriteriaToFindQuery(List<V3FilterCriteria>? filterCriteria)
-    {
-        if (filterCriteria == null || filterCriteria.Count == 0)
-            return null;
-
-        var conditions = new Dictionary<string, object>();
-
-        foreach (var criteria in filterCriteria)
-        {
-            var mongoOp = criteria.Operator switch
-            {
-                "eq" => null, // Direct equality doesn't need operator
-                "ne" => "$ne",
-                "gt" => "$gt",
-                "gte" => "$gte",
-                "lt" => "$lt",
-                "lte" => "$lte",
-                "in" => "$in",
-                "nin" => "$nin",
-                "re" => "$regex",
-                _ => null,
-            };
-
-            if (mongoOp == null && criteria.Operator == "eq")
-            {
-                // Direct equality: { "field": "value" }
-                conditions[criteria.Field] = criteria.Value ?? "";
-            }
-            else if (mongoOp != null)
-            {
-                // Operator form: { "field": { "$op": "value" } }
-                conditions[criteria.Field] = new Dictionary<string, object?>
-                {
-                    [mongoOp] = criteria.Value,
-                };
-            }
-        }
-
-        if (conditions.Count == 0)
-            return null;
-
-        return JsonSerializer.Serialize(conditions);
-    }
 
     private DateTimeOffset GetLastModified(List<Entry> entries)
     {
@@ -672,4 +548,15 @@ public class EntriesController : BaseV3Controller<Entry>
     }
 
     #endregion
+
+    /// <summary>
+    /// Gives an entry uploaded without an identifier a fresh ObjectId, stored as its legacy id, so
+    /// the create response, the socket event and later lookups all carry the same id.
+    /// </summary>
+    private static Entry WithIdentifier(Entry entry)
+    {
+        if (string.IsNullOrEmpty(entry.Id))
+            entry.Id = MongoObjectId.NewObjectId();
+        return entry;
+    }
 }

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Nocturne.Core.Contracts.V4.Repositories;
 using Nocturne.Core.Models;
 
 namespace Nocturne.Core.Contracts.Treatments;
@@ -46,6 +47,14 @@ public interface ITreatmentService
         string id,
         CancellationToken cancellationToken = default
     );
+
+    /// <summary>
+    /// Whether <paramref name="id"/> names a treatment the user deleted, so a save under it must not
+    /// bring the treatment back
+    /// </summary>
+    /// <param name="id">Treatment ID as the client sent it</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    Task<bool> IsTreatmentDeletedByUserAsync(string id, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Get treatments with advanced V3-style filtering, including StateSpan-derived temp basals.
@@ -99,8 +108,11 @@ public interface ITreatmentService
     /// </summary>
     /// <param name="treatments">Treatments to create</param>
     /// <param name="cancellationToken">Cancellation token</param>
-    /// <returns>Created treatments with assigned IDs</returns>
-    Task<IEnumerable<Treatment>> CreateTreatmentsAsync(
+    /// <returns>
+    /// Created treatments with assigned IDs, carrying how many of their records were not written
+    /// because the user had deleted them.
+    /// </returns>
+    Task<BulkWrite<Treatment>> CreateTreatmentsAsync(
         IEnumerable<Treatment> treatments,
         CancellationToken cancellationToken = default
     );

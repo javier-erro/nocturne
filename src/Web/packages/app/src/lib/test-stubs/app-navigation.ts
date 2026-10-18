@@ -1,7 +1,9 @@
 /**
  * Stub for $app/navigation in browser test environment.
  */
-export function goto(_url: string, _opts?: any) {
+import { page } from "./app-state";
+
+export function goto(_url: string, _opts?: unknown) {
   return Promise.resolve();
 }
 
@@ -13,15 +15,25 @@ export function invalidateAll() {
   return Promise.resolve();
 }
 
-export function beforeNavigate(_callback: any) {}
+export function beforeNavigate(_callback: unknown) {}
 
-export function afterNavigate(_callback: any) {}
+export function afterNavigate(_callback: unknown) {}
 
-export function onNavigate(_callback: any) {}
+export function onNavigate(_callback: unknown) {}
 
-export function replaceState(_url: string, _state?: any) {}
+/** Shallow routing: the URL (when given) and `page.state` change, nothing navigates. */
+function setShallowState(url: string | URL, state: App.PageState) {
+  if (url !== "") page.url = new URL(url, page.url);
+  page.state = state;
+}
 
-export function pushState(_url: string, _state?: any) {}
+export function replaceState(url: string | URL, state: App.PageState) {
+  setShallowState(url, state);
+}
+
+export function pushState(url: string | URL, state: App.PageState) {
+  setShallowState(url, state);
+}
 
 export function preloadData(_url: string) {
   return Promise.resolve();

@@ -1,13 +1,4 @@
 import { untrack } from "svelte";
-import {
-  type BasalPoint,
-  BasalDeliveryOrigin,
-  type DeviceEventType,
-  type SystemEventType,
-  type StateSpanCategory,
-  type TrackerCategory,
-} from "$lib/api";
-import { STALE_THRESHOLD_MS } from "$lib/constants/staleness";
 import { getRealtimeStore } from "$lib/stores/realtime-store.svelte";
 import { getChartData } from "$api/chart-data.remote";
 import { remoteErrorMessage } from "$lib/api/remote-error";
@@ -23,170 +14,34 @@ import {
   glucoseChartLookback,
   GLUCOSE_CHART_FETCH_HOURS,
 } from "$lib/stores/appearance-store.svelte";
-import { mergeChartData } from "$lib/utils/chart-data-merge";
+import { resolveChartThresholds } from "$lib/constants/glucose-thresholds";
+import { mergeChartData, replaceWindow } from "$lib/utils/chart-data-merge";
 import type { TransformedChartData } from "$lib/utils/chart-data-transform";
-import { getGlucoseColor } from "$lib/utils/chart-colors";
 import { stableBy } from "$lib/utils/stable-by";
-import { resolveGlucoseThresholds } from "$lib/constants/glucose-thresholds";
-import { bisector } from "d3";
+import { mergeRealtimeGlucose } from "./merge-glucose";
+import {
+  createChartDataView,
+  type ChartDataEngine,
+  type PredictionAvailability,
+} from "./chart-data-view.svelte";
 
-// ===== Data Point Types =====
-
-/** A single glucose reading with resolved color */
-export interface GlucosePoint {
-  time: Date;
-  sgv: number;
-  direction?: string;
-  dataSource?: string;
-  color: string;
-}
-
-/** A time-series point with a numeric value (IOB, COB) */
-export interface SeriesPoint {
-  time: Date;
-  value: number;
-}
-
-/** A bolus marker from the chart data */
-export interface BolusMarkerData {
-  time: Date;
-  insulin?: number;
-  bolusType?: string;
-  isOverride?: boolean;
-  treatmentId?: string;
-  dataSource?: string;
-  [key: string]: unknown;
-}
-
-/** A carb marker from the chart data */
-export interface CarbMarkerData {
-  time: Date;
-  carbs?: number;
-  label?: string;
-  treatmentId?: string;
-  dataSource?: string;
-  [key: string]: unknown;
-}
-
-/** A device event marker from the chart data */
-export interface DeviceEventMarkerData {
-  time: Date;
-  eventType?: DeviceEventType;
-  color: string;
-  treatmentId?: string;
-  [key: string]: unknown;
-}
-
-/** A system event marker from the chart data */
-export interface SystemEventMarkerData {
-  time: Date;
-  id?: string;
-  eventType?: SystemEventType;
-  color: string;
-  [key: string]: unknown;
-}
-
-/** A basal injection marker from the chart data */
-export interface BasalInjectionMarkerData {
-  time: Date;
-  id: string;
-  units: number;
-  insulinName?: string | null;
-}
-
-/** A BG check (fingerprick) marker from the chart data */
-export interface BgCheckMarkerData {
-  time: Date;
-  glucose: number;
-  glucoseType?: string | null;
-  treatmentId?: string | null;
-}
-
-/** A tracker expiration marker */
-export interface TrackerMarkerData {
-  time: Date;
-  id?: string;
-  category?: TrackerCategory;
-  color: string;
-  [key: string]: unknown;
-}
-
-/** A state span (pump mode, override, profile, activity, temp basal, basal delivery) */
-export interface StateSpan {
-  id?: string;
-  kind?: string;
-  category?: StateSpanCategory;
-  state?: string;
-  startTime: Date;
-  endTime: Date | null;
-  color: string;
-  metadata?: Record<string, unknown> | null;
-}
-
-/** A state span with display-clipped start/end times */
-export interface DisplaySpan extends StateSpan {
-  displayStart: Date;
-  displayEnd: Date;
-}
-
-/** A profile span with extracted profile name */
-export interface DisplayProfileSpan extends DisplaySpan {
-  profileName: string;
-}
-
-/** A temp basal span with extracted rate/percent */
-export interface DisplayTempBasalSpan extends DisplaySpan {
-  rate: number | null;
-  percent: number | null;
-}
-
-/** Basal delivery span with rate and origin */
-export interface BasalDeliverySpan {
-  id?: string;
-  startTime: Date;
-  endTime: Date | null;
-  rate?: number;
-  origin?: typeof BasalDeliveryOrigin[keyof typeof BasalDeliveryOrigin];
-  fillColor: string;
-  strokeColor: string;
-  [key: string]: unknown;
-}
-
-/** Display-clipped basal delivery span */
-export interface DisplayBasalDeliverySpan extends BasalDeliverySpan {
-  displayStart: Date;
-  displayEnd: Date;
-}
-
-/** Stale basal time range */
-export interface StaleBasalRange {
-  start: Date;
-  end: Date;
-}
-
-/** Scheduled basal point for the dotted overlay */
-export interface ScheduledBasalPoint {
-  timestamp?: number;
-  rate?: number;
-}
-
-// ===== Proximity constant =====
-
-export const TREATMENT_PROXIMITY_MS = 5 * 60 * 1000;
+export * from "./chart-data-view.svelte";
 
 // ===== Options & Interfaces =====
 
 export interface ChartDataEngineOptions {
   /**
-   * Pass as a getter (`get dateRange() { … }`) wherever this can change while the
-   * engine lives: read into a plain object literal it is captured once, and the
-   * engine goes on fetching and drawing the window it was constructed with. A
-   * consumer that instead re-creates the engine per window — `{#key}` around an
-   * `{@const}` — may pass the value directly.
+   * Pass as a getter (`get dateRange() { … }`) wherever this can change while
+   * the engine lives: read into a plain object literal it is captured once, and
+   * the engine goes on fetching and drawing the window it was constructed with.
+   * A consumer that instead re-creates the engine per window — `{#key}` around
+   * an `{@const}` — may pass the value directly.
    */
   dateRange?: { from: Date | string; to: Date | string };
   focusHours?: number;
   initialChartData?: TransformedChartData | null;
+  /** Where `initialChartData`'s window starts, in ms; adopting a reload replaces from here. */
+  initialWindowStart?: number;
   streamedHistoricalData?: Promise<TransformedChartData | null>;
   externalPredictionData?: PredictionData | null;
   enablePredictions?: boolean;
@@ -196,110 +51,58 @@ export interface ChartDataEngineOptions {
    * reach. `"buffer"` is `fullDataRange` — `dateRange` when one was named, the
    * 48-hour buffer otherwise — which is what `fullXDomain` spans and therefore
    * what anything rendering the mini overview needs, however it was fed.
-   * `"display"` is the visible window alone, for a consumer that renders nothing
-   * wider: the sidebar sparkline, the clock faces.
+   * `"display"` is the visible window alone, for a consumer that renders
+   * nothing wider: the sidebar sparkline, the clock faces.
    *
-   * Defaults to `"buffer"`: over-reaching costs points a chart declines to draw,
-   * where under-reaching silently drops points it is drawing.
+   * Defaults to `"buffer"`: over-reaching costs points a chart declines to
+   * draw, where under-reaching silently drops points it is drawing.
    */
   dataWindow?: "buffer" | "display";
+  /**
+   * Where glucose comes from. `"chart-data"` fetches the chart-data window and
+   * merges the realtime store's readings into it. `"realtime"` never fetches: it
+   * draws the store's readings, with the thresholds the store holds, and still
+   * honours `initialChartData` if given.
+   *
+   * Defaults to `"chart-data"`.
+   */
+  glucoseSource?: "chart-data" | "realtime";
   /** Fired once when `serverChartData` first becomes non-null. */
   onDataReady?: () => void;
 }
 
-/** All lookup functions for tooltip and inspection consumers */
-export interface SeriesFinders {
-  findSeriesValue: <T extends { time: Date }>(series: T[], time: Date) => T | undefined;
-  findBasalValue: <T extends { timestamp?: number }>(series: T[], time: Date) => T | undefined;
-  findNearbyBolus: (time: Date) => BolusMarkerData | undefined;
-  findNearbyCarbs: (time: Date) => CarbMarkerData | undefined;
-  findNearbyDeviceEvent: (time: Date) => DeviceEventMarkerData | undefined;
-  findActivePumpMode: (time: Date) => DisplaySpan | undefined;
-  findActiveOverride: (time: Date) => DisplaySpan | undefined;
-  findActiveProfile: (time: Date) => DisplayProfileSpan | undefined;
-  findActiveActivities: (time: Date) => DisplaySpan[];
-  findActiveTempBasal: (time: Date) => DisplayTempBasalSpan | undefined;
-  findActiveBasalDelivery: (time: Date) => DisplayBasalDeliverySpan | undefined;
-  findNearbySystemEvent: (time: Date) => SystemEventMarkerData | undefined;
-  /** Check whether a given time falls inside the stale basal range */
-  isStaleBasalTime: (time: Date) => boolean;
-  /** Find the previous glucose reading before the given time */
-  findPreviousGlucose: (time: Date) => GlucosePoint | undefined;
+const FIVE_MINUTES_MS = 5 * 60 * 1000;
+// Equals INITIAL_HOURS in routes/(authenticated)/+page.server.ts.
+const RECENT_REFRESH_HOURS = 6;
+const RECENT_REFRESH_DEBOUNCE_MS = 2000;
+const RECENT_REFRESH_FALLBACK_MS = FIVE_MINUTES_MS;
+
+function fingerprint(rows: readonly { id?: string; _id?: string }[]): string {
+  const first = rows[0];
+  const last = rows[rows.length - 1];
+  return `${rows.length}:${first?.id ?? first?._id ?? ""}:${last?.id ?? last?._id ?? ""}`;
 }
 
-/** The reactive chart data engine returned by createChartDataEngine */
-export interface ChartDataEngine {
-  // Server / merged data
-  readonly serverChartData: TransformedChartData | null;
+// ===== Date helpers =====
+// Outside the factory: svelte/prefer-svelte-reactivity reports every Date built
+// inside an exported function, and none of these is ever mutated.
 
-  // Glucose (merged with realtime)
-  readonly glucoseData: GlucosePoint[];
+function toDate(date: Date | string | undefined): Date {
+  if (!date) return new Date();
+  return date instanceof Date ? date : new Date(date);
+}
 
-  // Predictions
-  readonly predictionData: PredictionData | null;
-  readonly predictionError: string | null;
-  readonly predictionServiceAvailable: boolean;
-  readonly effectiveShowPredictions: boolean;
-
-  // Time ranges
-  readonly nowMinute: number;
-  readonly lookbackHours: number;
-  readonly fullDataRange: { from: Date; to: Date };
-  readonly displayDateRange: { from: Date; to: Date };
-  readonly displayDateRangeWithPredictions: { from: Date; to: Date };
-  readonly fullXDomain: { from: Date; to: Date };
-
-  // Series
-  readonly bolusMarkers: BolusMarkerData[];
-  readonly carbMarkers: CarbMarkerData[];
-  readonly deviceEventMarkers: DeviceEventMarkerData[];
-  readonly basalInjectionMarkers: BasalInjectionMarkerData[];
-  readonly bgCheckMarkers: BgCheckMarkerData[];
-  readonly iobData: SeriesPoint[];
-  readonly cobData: SeriesPoint[];
-  readonly basalData: BasalPoint[];
-  readonly scheduledBasalData: ScheduledBasalPoint[];
-  readonly maxIOB: number;
-  readonly maxBasalRate: number;
-
-  // Thresholds
-  readonly lowThreshold: number;
-  readonly highThreshold: number;
-  readonly veryHighThreshold: number;
-  readonly veryLowThreshold: number;
-  readonly glucoseYMax: number;
-  readonly thresholds: {
-    low: number;
-    high: number;
-    veryLow: number;
-    veryHigh: number;
-    glucoseYMax: number;
-    targetLow: number | null;
-    targetHigh: number | null;
+function hoursEndingAt(endMs: number, hours: number): { from: Date; to: Date } {
+  return {
+    from: new Date(endMs - hours * 60 * 60 * 1000),
+    to: new Date(endMs),
   };
-  readonly medianGlucose: number;
+}
 
-  // State spans (processed / display-clipped)
-  readonly displayPumpModeSpans: DisplaySpan[];
-  readonly displayOverrideSpans: DisplaySpan[];
-  readonly displayProfileSpans: DisplayProfileSpan[];
-  readonly displayActivitySpans: DisplaySpan[];
-  readonly displayTempBasalSpans: DisplayTempBasalSpan[];
-  readonly displayBasalDeliverySpans: DisplayBasalDeliverySpan[];
-  readonly displaySystemEvents: SystemEventMarkerData[];
+const FETCH_INTERVAL_MS = 5 * 60 * 1000;
 
-  // Tracker markers (display-filtered)
-  readonly displayTrackerMarkers: TrackerMarkerData[];
-
-  // Stale basal
-  readonly staleBasalData: StaleBasalRange | null;
-
-  // Pump mode
-  readonly currentPumpMode: string;
-  readonly uniquePumpModes: string[];
-
-  // Series finders
-  readonly finders: SeriesFinders;
+function shiftDate(date: Date, ms: number): Date {
+  return new Date(date.getTime() + ms);
 }
 
 // ===== Factory =====
@@ -309,6 +112,7 @@ export function createChartDataEngine(
 ): ChartDataEngine {
   const realtimeStore = getRealtimeStore();
   const isBrowser = typeof window !== "undefined";
+  const realtimeOnly = $derived(options.glucoseSource === "realtime");
 
   // ---- Mutable state ----
   // `$state.raw`, not `$state`: serverChartData holds large arrays of glucose
@@ -324,18 +128,11 @@ export function createChartDataEngine(
   // reassigned wholesale, never deep-mutated.
   let predictionData = $state.raw<PredictionData | null>(null);
   let predictionError = $state<string | null>(null);
-  let predictionServiceAvailable = $state(false);
+  let chartDataError = $state<string | null>(null);
+  let predictionServiceStatus = $state<PredictionAvailability>("unknown");
+  const predictionServiceAvailable = $derived(predictionServiceStatus === "available");
   let processedHistoricalPromise =
     $state<Promise<TransformedChartData | null> | null>(null);
-
-  // ---- Helpers ----
-  function normalizeDate(
-    date: Date | string | undefined,
-    fallback: Date
-  ): Date {
-    if (!date) return fallback;
-    return date instanceof Date ? date : new Date(date);
-  }
 
   // ---- Time ranges ----
   const nowMinute = $derived(Math.floor(realtimeStore.now / 60000) * 60000);
@@ -348,36 +145,41 @@ export function createChartDataEngine(
     options.externalPredictionData !== undefined
   );
 
-  const effectiveShowPredictions = $derived(
-    (options.enablePredictions ?? true) &&
-    (predictionServiceAvailable || hasExternalPredictions)
+  const predictionAvailability = $derived<PredictionAvailability>(
+    !(options.enablePredictions ?? true)
+      ? "unavailable"
+      : hasExternalPredictions
+        ? "available"
+        : predictionServiceStatus
   );
 
-  const fullDataRange = $derived({
-    from: options.dateRange
-      ? normalizeDate(options.dateRange.from, new Date())
-      : new Date(nowMinute - GLUCOSE_CHART_FETCH_HOURS * 60 * 60 * 1000),
-    to: options.dateRange
-      ? normalizeDate(options.dateRange.to, new Date())
-      : new Date(nowMinute),
-  });
+  const effectiveShowPredictions = $derived(
+    (options.enablePredictions ?? true) &&
+      (predictionServiceAvailable || hasExternalPredictions)
+  );
 
-  const displayDateRange = $derived({
-    from: options.dateRange
-      ? normalizeDate(options.dateRange.from, new Date())
-      : new Date(nowMinute - lookbackHours * 60 * 60 * 1000),
-    to: options.dateRange
-      ? normalizeDate(options.dateRange.to, new Date())
-      : new Date(nowMinute),
-  });
+  const fullDataRange = $derived(
+    options.dateRange
+      ? {
+          from: toDate(options.dateRange.from),
+          to: toDate(options.dateRange.to),
+        }
+      : hoursEndingAt(nowMinute, GLUCOSE_CHART_FETCH_HOURS)
+  );
+
+  const displayDateRange = $derived(
+    options.dateRange
+      ? {
+          from: toDate(options.dateRange.from),
+          to: toDate(options.dateRange.to),
+        }
+      : hoursEndingAt(nowMinute, lookbackHours)
+  );
 
   const displayDateRangeWithPredictions = $derived({
     from: displayDateRange.from,
     to: effectiveShowPredictions
-      ? new Date(
-        displayDateRange.to.getTime() +
-        predictionMinutes.current * 60 * 1000
-      )
+      ? shiftDate(displayDateRange.to, predictionMinutes.current * 60 * 1000)
       : displayDateRange.to,
   });
 
@@ -387,17 +189,15 @@ export function createChartDataEngine(
     from: fullDataRange.from,
     to:
       effectiveShowPredictions && predictionData
-        ? new Date(
-          fullDataRange.to.getTime() + predictionHours * 60 * 60 * 1000
-        )
+        ? shiftDate(fullDataRange.to, predictionHours * 60 * 60 * 1000)
         : fullDataRange.to,
   });
 
   // ---- Data range ----
   // How far the realtime merge may reach: the window the consumer draws, per
-  // `dataWindow`. The realtime store holds the last 1000 readings — several days
-  // of them — so merging over `fullDataRange` for a consumer that draws only the
-  // visible window hands its chart points it will never render.
+  // `dataWindow`. The realtime store holds the last day's readings, at most 1000, so merging
+  // over `fullDataRange` for a consumer that draws only the visible window hands
+  // its chart points it will never render.
   const dataRange = $derived(
     options.dataWindow === "display" ? displayDateRange : fullDataRange
   );
@@ -405,19 +205,22 @@ export function createChartDataEngine(
   // ---- Stable fetch range ----
   // Fetch only the visible window when no dateRange is configured. The wider
   // `fullDataRange` (48h) is used by the MiniOverview on the dashboard, which
-  // preloads data via SSR — so consumers that hit this fetch path (sidebar
-  // widget, clock face) don't need the full buffer.
-  const stableFetchRange = $derived.by(() => {
-    if (!isBrowser) return null;
-    const range = options.dateRange ? fullDataRange : displayDateRange;
-    const fromTime = range.from.getTime();
-    const toTime = range.to.getTime();
-    if (isNaN(fromTime) || isNaN(toTime)) return null;
-    const intervalMs = 5 * 60 * 1000;
-    const startRounded = Math.floor(fromTime / intervalMs) * intervalMs;
-    const endRounded = Math.ceil(toTime / intervalMs) * intervalMs;
-    return { startTime: startRounded, endTime: endRounded };
-  });
+  // preloads data via SSR — so consumers that hit this fetch path (clock
+  // face) don't need the full buffer.
+  // Primitive deriveds, so the range object below is rebuilt only when a
+  // rounded bound moves: `displayDateRange` is a fresh object every minute.
+  const fetchRange = $derived(options.dateRange ? fullDataRange : displayDateRange);
+  const fetchStart = $derived(
+    Math.floor(fetchRange.from.getTime() / FETCH_INTERVAL_MS) * FETCH_INTERVAL_MS
+  );
+  const fetchEnd = $derived(
+    Math.ceil(fetchRange.to.getTime() / FETCH_INTERVAL_MS) * FETCH_INTERVAL_MS
+  );
+  const stableFetchRange = $derived(
+    !isBrowser || isNaN(fetchStart) || isNaN(fetchEnd)
+      ? null
+      : { startTime: fetchStart, endTime: fetchEnd }
+  );
 
   // ---- Effects: data fetching ----
 
@@ -504,6 +307,7 @@ export function createChartDataEngine(
 
   // Skip if we already have initial data from SSR streaming
   $effect(() => {
+    if (realtimeOnly) return;
     if (options.initialChartData && untrack(() => serverChartData)) return;
 
     const range = stableFetchRange;
@@ -517,12 +321,15 @@ export function createChartDataEngine(
       intervalMinutes: 5,
     })
       .then((data) => {
-        if (!cancelled) serverChartData = data;
+        if (cancelled) return;
+        serverChartData = data;
+        chartDataError = null;
       })
       .catch((err) => {
         if (!cancelled) {
           console.error("Failed to fetch chart data:", err);
           serverChartData = null;
+          chartDataError = remoteErrorMessage(err, "The chart data could not be loaded.");
         }
       });
 
@@ -531,30 +338,128 @@ export function createChartDataEngine(
     };
   });
 
-  // Notify caller once chart data is available (for gating playback, etc.)
-  let dataReadyFired = false;
-  $effect(() => {
-    if (serverChartData && !dataReadyFired) {
-      dataReadyFired = true;
-      options.onDataReady?.();
+  // The effect above never refetches SSR data and realtime streams only glucose,
+  // so IOB, COB, basal and treatment markers are refreshed here. Triggers: realtime
+  // devicestatus creates (the AID cadence), legacy `treatments` socket events and app
+  // writes via `treatmentRevision`, and the store's backfill; the timer covers IOB
+  // decaying with no new data.
+  const hasInitialData = $derived(!!options.initialChartData && !realtimeOnly);
+  const dataFingerprint = $derived(
+    hasInitialData
+      ? [
+          realtimeStore.treatmentRevision,
+          fingerprint(realtimeStore.boluses),
+          fingerprint(realtimeStore.carbIntakes),
+          fingerprint(realtimeStore.bgChecks),
+          fingerprint(realtimeStore.deviceEvents),
+          fingerprint(realtimeStore.deviceStatuses),
+        ].join("|")
+      : null
+  );
+
+  let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+  let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+  // A response is applied only while its sequence number is still current; adopting
+  // page data, a newer refresh and teardown all bump it.
+  let refreshSeq = 0;
+  let seenFingerprint: string | null = null;
+  let skippedWhileHidden = false;
+  // svelte-ignore state_referenced_locally
+  let seenInitialData = options.initialChartData;
+
+  function recentWindow() {
+    const endTime = Math.ceil(Date.now() / FIVE_MINUTES_MS) * FIVE_MINUTES_MS;
+    return { startTime: endTime - RECENT_REFRESH_HOURS * 60 * 60 * 1000, endTime };
+  }
+
+  function scheduleRefresh() {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(refreshRecent, RECENT_REFRESH_DEBOUNCE_MS);
+  }
+
+  function refreshRecent() {
+    clearTimeout(fallbackTimer);
+    fallbackTimer = setTimeout(refreshRecent, RECENT_REFRESH_FALLBACK_MS);
+
+    if (document.visibilityState === "hidden") {
+      skippedWhileHidden = true;
+      return;
     }
+    skippedWhileHidden = false;
+
+    const seq = ++refreshSeq;
+    const { startTime, endTime } = recentWindow();
+    getChartData({ startTime, endTime, intervalMinutes: 5 })
+      .run()
+      .then((recent) => {
+        if (seq !== refreshSeq) return;
+        const current = untrack(() => serverChartData);
+        serverChartData = current ? replaceWindow(current, recent, startTime) : recent;
+      })
+      .catch((err) => {
+        if (seq === refreshSeq) console.error("Failed to refresh recent chart data:", err);
+      });
+  }
+
+  // A page-data reload (every successful form submit runs invalidateAll) carries a
+  // freshly computed window; take it rather than discard it.
+  $effect(() => {
+    const next = options.initialChartData;
+    if (!next || next === seenInitialData) return;
+    seenInitialData = next;
+    refreshSeq++;
+    const current = untrack(() => serverChartData);
+    serverChartData = current ? replaceWindow(
+          current,
+          next,
+          options.initialWindowStart ?? recentWindow().startTime
+        ) : next;
+  });
+
+  $effect(() => {
+    if (!isBrowser || dataFingerprint === null || !realtimeStore.isReady) return;
+    // The store's own initial load rewrites these arrays; SSR data predates it by seconds.
+    if (seenFingerprint === null) {
+      seenFingerprint = dataFingerprint;
+      return;
+    }
+    if (dataFingerprint === seenFingerprint) return;
+    seenFingerprint = dataFingerprint;
+    scheduleRefresh();
+  });
+
+  $effect(() => {
+    if (!isBrowser || !hasInitialData) return;
+
+    fallbackTimer = setTimeout(refreshRecent, RECENT_REFRESH_FALLBACK_MS);
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && skippedWhileHidden) scheduleRefresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+
+    return () => {
+      refreshSeq++;
+      clearTimeout(debounceTimer);
+      clearTimeout(fallbackTimer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   });
 
   // Check prediction service availability on mount
   $effect(() => {
-    if (!isBrowser) return;
+    if (!isBrowser || !(options.enablePredictions ?? true)) return;
 
     let cancelled = false;
     getPredictionStatus({})
       .then((status) => {
         if (!cancelled) {
-          predictionServiceAvailable = status.available;
+          predictionServiceStatus = status.available ? "available" : "unavailable";
         }
       })
       .catch((err) => {
         if (!cancelled) {
           console.warn("Failed to check prediction service status:", err);
-          predictionServiceAvailable = false;
+          predictionServiceStatus = "unavailable";
         }
       });
 
@@ -575,45 +480,11 @@ export function createChartDataEngine(
   // is re-executed on every read, not once per change. This is the most-read
   // series in the app, and a fresh array from it re-dirties the chart's entire
   // extent and scale chain, which reads it again. See the note on `stableBy`.
-  const mergeGlucose = stableBy(
-    (
-      chartData: TransformedChartData | null,
-      entries: typeof realtimeStore.entries,
-      fromMs: number,
-      toMs: number
-    ): GlucosePoint[] => {
-      const base = chartData?.glucoseData ?? [];
-      if (!chartData) return base as GlucosePoint[];
+  const mergeGlucose = stableBy(mergeRealtimeGlucose);
+  const resolveThresholds = stableBy(resolveChartThresholds);
 
-      const thresholds = resolveGlucoseThresholds(chartData.thresholds);
-
-      const byMills = new Map<number, GlucosePoint>();
-      for (const p of base) byMills.set(p.time.getTime(), p);
-
-      for (const e of entries) {
-        if (
-          e.type !== "sgv" ||
-          e.mills == null ||
-          e.sgv == null ||
-          e.mills < fromMs ||
-          e.mills > toMs ||
-          byMills.has(e.mills)
-        ) {
-          continue;
-        }
-        byMills.set(e.mills, {
-          time: new Date(e.mills),
-          sgv: e.sgv,
-          direction: e.direction,
-          dataSource: e.data_source,
-          color: getGlucoseColor(e.sgv, thresholds),
-        });
-      }
-
-      return [...byMills.values()].sort(
-        (a, b) => a.time.getTime() - b.time.getTime()
-      ) as GlucosePoint[];
-    }
+  const realtimeThresholds = $derived(
+    realtimeOnly ? resolveThresholds(realtimeStore.chartThresholds) : undefined
   );
 
   const glucoseData = $derived(
@@ -621,410 +492,56 @@ export function createChartDataEngine(
       serverChartData,
       realtimeStore.entries,
       dataRange.from.getTime(),
-      dataRange.to.getTime()
+      dataRange.to.getTime(),
+      realtimeThresholds
     )
   );
 
-  // ---- Series derivations ----
-  const bolusMarkers = $derived(
-    (serverChartData?.bolusMarkers ?? []) as BolusMarkerData[]
-  );
-  const carbMarkers = $derived(
-    (serverChartData?.carbMarkers ?? []) as CarbMarkerData[]
-  );
-  const deviceEventMarkers = $derived(
-    (serverChartData?.deviceEventMarkers ?? []) as DeviceEventMarkerData[]
-  );
-  const basalInjectionMarkers = $derived(
-    (serverChartData?.basalInjectionMarkers ?? []) as BasalInjectionMarkerData[]
-  );
-  const bgCheckMarkers = $derived(
-    (serverChartData?.bgCheckMarkers ?? []) as BgCheckMarkerData[]
-  );
-  const iobData = $derived(
-    (serverChartData?.iobSeries ?? []) as SeriesPoint[]
-  );
-  const cobData = $derived(
-    (serverChartData?.cobSeries ?? []) as SeriesPoint[]
-  );
-  const basalData = $derived((serverChartData?.basalSeries ?? []) as BasalPoint[]);
-  const maxIOB = $derived(serverChartData?.maxIob ?? 3);
-  const maxBasalRate = $derived(serverChartData?.maxBasalRate ?? 3.0);
-
-  const scheduledBasalData = $derived(
-    basalData.map((d) => ({
-      timestamp: d.timestamp,
-      rate: d.scheduledRate ?? d.rate,
-    }))
-  );
-
-  // ---- Thresholds ----
-  // The tenant's own cut-points, with the shared fallback filling any the server
-  // omitted (it sends 0 when there is no profile yet).
-  const resolvedThresholds = $derived(
-    resolveGlucoseThresholds(serverChartData?.thresholds)
-  );
-  const lowThreshold = $derived(resolvedThresholds.low);
-  const highThreshold = $derived(resolvedThresholds.high);
-  const veryHighThreshold = $derived(resolvedThresholds.veryHigh);
-  const veryLowThreshold = $derived(resolvedThresholds.veryLow);
-  const glucoseYMax = $derived(
-    serverChartData?.thresholds?.glucoseYMax || 300
-  );
-  // Personal target reference line; `??` (not `||`) so a legitimate 0 isn't
-  // dropped, and absent target (no profile) stays null rather than rendering.
-  const targetLow = $derived(serverChartData?.thresholds?.targetLow ?? null);
-  const targetHigh = $derived(serverChartData?.thresholds?.targetHigh ?? null);
-
-  const medianGlucose = $derived.by(() => {
-    if (glucoseData.length === 0) return 100;
-    const sorted = [...glucoseData].sort((a, b) => a.sgv - b.sgv);
-    const mid = Math.floor(sorted.length / 2);
-    return sorted.length % 2 !== 0
-      ? sorted[mid].sgv
-      : (sorted[mid - 1].sgv + sorted[mid].sgv) / 2;
-  });
-
-  // ---- State spans ----
-  const pumpModeSpans = $derived(serverChartData?.pumpModeSpans ?? []);
-  const overrideSpans = $derived(serverChartData?.overrideSpans ?? []);
-  const profileSpans = $derived(serverChartData?.profileSpans ?? []);
-  const activitySpans = $derived(serverChartData?.activitySpans ?? []);
-  const tempBasalSpans = $derived(serverChartData?.tempBasalSpans ?? []);
-  const basalDeliverySpans = $derived(
-    serverChartData?.basalDeliverySpans ?? []
-  );
-  const systemEvents = $derived(serverChartData?.systemEventMarkers ?? []);
-  const trackerMarkers = $derived(serverChartData?.trackerMarkers ?? []);
-
-  function processSpans<T extends { startTime: Date; endTime?: Date | null }>(
-    spans: T[],
-    rangeStart: number,
-    rangeEnd: number
-  ) {
-    if (!spans) return [];
-    return spans
-      .filter((span) => {
-        const spanStart = span.startTime.getTime();
-        const spanEnd = span.endTime?.getTime() ?? rangeEnd;
-        return spanEnd > rangeStart && spanStart < rangeEnd;
-      })
-      .map((span) => ({
-        ...span,
-        displayStart: new Date(Math.max(span.startTime.getTime(), rangeStart)),
-        displayEnd: new Date(
-          Math.min(span.endTime?.getTime() ?? rangeEnd, rangeEnd)
-        ),
-      }));
-  }
-
-  const processedStateSpans = $derived.by(() => {
-    const rangeStart = fullDataRange.from.getTime();
-    const rangeEnd = fullDataRange.to.getTime();
-
-    const pumpMode = processSpans(pumpModeSpans, rangeStart, rangeEnd);
-
-    const override = processSpans(overrideSpans, rangeStart, rangeEnd);
-
-    const profile = processSpans(profileSpans, rangeStart, rangeEnd).map(
-      (span) => ({
-        ...span,
-        profileName:
-          (span.metadata?.profileName as string) ?? span.state ?? "",
-      })
-    );
-
-    const activity = processSpans(activitySpans, rangeStart, rangeEnd);
-
-    const tempBasal = processSpans(tempBasalSpans, rangeStart, rangeEnd).map(
-      (span) => ({
-        ...span,
-        rate:
-          (span.metadata?.rate as number) ??
-          (span.metadata?.absolute as number) ??
-          null,
-        percent: (span.metadata?.percent as number) ?? null,
-      })
-    );
-
-    const basalDelivery = processSpans(
-      basalDeliverySpans,
-      rangeStart,
-      rangeEnd
-    );
-
-    const events = systemEvents.filter((event) => {
-      const eventTime = event.time.getTime();
-      return eventTime >= rangeStart && eventTime <= rangeEnd;
-    });
-
-    return {
-      pumpMode,
-      override,
-      profile,
-      activity,
-      tempBasal,
-      basalDelivery,
-      events,
-    };
-  });
-
-  const displayPumpModeSpans = $derived(processedStateSpans.pumpMode);
-  const displayOverrideSpans = $derived(processedStateSpans.override);
-  const displayProfileSpans = $derived(processedStateSpans.profile);
-  const displayActivitySpans = $derived(processedStateSpans.activity);
-  const displayTempBasalSpans = $derived(processedStateSpans.tempBasal);
-  const displayBasalDeliverySpans = $derived(
-    processedStateSpans.basalDelivery
-  );
-  const displaySystemEvents = $derived(processedStateSpans.events);
-
-  // ---- Tracker markers filtered to display range ----
-  const displayTrackerMarkers = $derived.by(() => {
-    const rangeStart = displayDateRange.from.getTime();
-    const predEnd = effectiveShowPredictions && predictionData
-      ? new Date(
-        displayDateRange.to.getTime() + predictionHours * 60 * 60 * 1000
-      ).getTime()
-      : displayDateRange.to.getTime();
-    return trackerMarkers
-      .filter((m) => {
-        const t = m.time.getTime();
-        return t >= rangeStart && t <= predEnd;
-      })
-      .sort((a, b) => a.time.getTime() - b.time.getTime());
-  });
-
-  // ---- Stale basal detection ----
-  const lastBasalSourceTime = $derived.by(() => {
-    if (displayBasalDeliverySpans.length === 0) return 0;
-    let latestEndTime = 0;
-    for (const span of displayBasalDeliverySpans) {
-      const endTime = span.endTime?.getTime() ?? span.startTime.getTime();
-      if (endTime > latestEndTime) {
-        latestEndTime = endTime;
-      }
-    }
-    return latestEndTime;
-  });
-
-  const staleBasalData = $derived.by(() => {
-    if (lastBasalSourceTime === 0) return null;
-    const rangeEndTime = displayDateRange.to.getTime();
-    const timeSinceLastUpdate = rangeEndTime - lastBasalSourceTime;
-    const rangeStartTime = displayDateRange.from.getTime();
-    if (
-      timeSinceLastUpdate > STALE_THRESHOLD_MS &&
-      lastBasalSourceTime >= rangeStartTime
-    ) {
-      return {
-        start: new Date(lastBasalSourceTime),
-        end: new Date(rangeEndTime),
-      };
-    }
-    return null;
-  });
-
-  // ---- Pump mode ----
-  const currentPumpMode = $derived.by(() => {
-    if (displayPumpModeSpans.length === 0) return "Automatic";
-    const now = Date.now();
-    const activeSpan = displayPumpModeSpans.find((span) => {
-      const spanEnd = span.endTime?.getTime() ?? now + 1;
-      return span.startTime.getTime() <= now && spanEnd >= now;
-    });
-    if (activeSpan) return activeSpan.state ?? "Automatic";
-    const sorted = [...displayPumpModeSpans].sort(
-      (a, b) =>
-        (b.endTime?.getTime() ?? now) - (a.endTime?.getTime() ?? now)
-    );
-    return sorted[0]?.state ?? "Automatic";
-  });
-
-  const uniquePumpModes = $derived([
-    ...new Set(displayPumpModeSpans.map((s) => s.state ?? "")),
-  ]);
-
-  // ---- Series finders ----
-  const bisectDate = bisector((d: { time: Date }) => d.time).left;
-  const bisectTimestamp = bisector(
-    (d: { timestamp?: number }) => d.timestamp ?? 0
-  ).left;
-
-  function findSeriesValue<T extends { time: Date }>(
-    series: T[],
-    time: Date
-  ): T | undefined {
-    const i = bisectDate(series, time, 1);
-    const d0 = series[i - 1];
-    const d1 = series[i];
-    if (!d0) return d1;
-    if (!d1) return d0;
-    return time.getTime() - d0.time.getTime() >
-      d1.time.getTime() - time.getTime()
-      ? d1
-      : d0;
-  }
-
-  function findBasalValue<T extends { timestamp?: number }>(
-    series: T[],
-    time: Date
-  ): T | undefined {
-    if (!series || series.length === 0) return undefined;
-    const timeMs = time.getTime();
-    const i = bisectTimestamp(series, timeMs, 1);
-    return series[i - 1];
-  }
-
-  function findNearbyBolus(time: Date) {
-    return bolusMarkers.find(
-      (b) =>
-        Math.abs(b.time.getTime() - time.getTime()) < TREATMENT_PROXIMITY_MS
-    );
-  }
-
-  function findNearbyCarbs(time: Date) {
-    return carbMarkers.find(
-      (c) =>
-        Math.abs(c.time.getTime() - time.getTime()) < TREATMENT_PROXIMITY_MS
-    );
-  }
-
-  function findNearbyDeviceEvent(time: Date) {
-    return deviceEventMarkers.find(
-      (d) =>
-        Math.abs(d.time.getTime() - time.getTime()) < TREATMENT_PROXIMITY_MS
-    );
-  }
-
-  function findActiveSpan<T extends { startTime: Date; endTime?: Date | null }>(
-    spans: T[],
-    time: Date,
-    findAll: false
-  ): T | undefined;
-  function findActiveSpan<T extends { startTime: Date; endTime?: Date | null }>(
-    spans: T[],
-    time: Date,
-    findAll: true
-  ): T[];
-  function findActiveSpan<T extends { startTime: Date; endTime?: Date | null }>(
-    spans: T[],
-    time: Date,
-    findAll: boolean
-  ): T | T[] | undefined {
-    const timeMs = time.getTime();
-    const predicate = (span: T) => {
-      const spanStart = span.startTime.getTime();
-      const spanEnd = span.endTime?.getTime() ?? Date.now();
-      return timeMs >= spanStart && timeMs <= spanEnd;
-    };
-    return findAll ? spans.filter(predicate) : spans.find(predicate);
-  }
-
-  const findActivePumpMode = (time: Date) =>
-    findActiveSpan(displayPumpModeSpans, time, false);
-  const findActiveOverride = (time: Date) =>
-    findActiveSpan(displayOverrideSpans, time, false);
-  const findActiveProfile = (time: Date) =>
-    findActiveSpan(displayProfileSpans, time, false);
-  const findActiveActivities = (time: Date) =>
-    findActiveSpan(displayActivitySpans, time, true);
-  const findActiveTempBasal = (time: Date) =>
-    findActiveSpan(displayTempBasalSpans, time, false);
-  const findActiveBasalDelivery = (time: Date) =>
-    findActiveSpan(displayBasalDeliverySpans, time, false);
-
-  function findNearbySystemEvent(time: Date) {
-    return displaySystemEvents.find(
-      (event) =>
-        Math.abs(event.time.getTime() - time.getTime()) <
-        TREATMENT_PROXIMITY_MS
-    );
-  }
-
-  function isStaleBasalTime(time: Date): boolean {
-    if (!staleBasalData) return false;
-    return (
-      time.getTime() >= staleBasalData.start.getTime() &&
-      time.getTime() <= staleBasalData.end.getTime()
-    );
-  }
-
-  function findPreviousGlucose(time: Date): GlucosePoint | undefined {
-    const idx = bisectDate(glucoseData, time, 1);
-    return idx >= 2 ? glucoseData[idx - 2] : undefined;
-  }
-
-  // ---- Return reactive object ----
-  const finders: SeriesFinders = {
-    findSeriesValue,
-    findBasalValue,
-    findNearbyBolus,
-    findNearbyCarbs,
-    findNearbyDeviceEvent,
-    findActivePumpMode,
-    findActiveOverride,
-    findActiveProfile,
-    findActiveActivities,
-    findActiveTempBasal,
-    findActiveBasalDelivery,
-    findNearbySystemEvent,
-    isStaleBasalTime,
-    findPreviousGlucose,
-  };
-
-  return {
-    get serverChartData() { return serverChartData; },
-    get glucoseData() { return glucoseData; },
-    get predictionData() { return predictionData; },
-    get predictionError() { return predictionError; },
-    get predictionServiceAvailable() { return predictionServiceAvailable; },
-    get effectiveShowPredictions() { return effectiveShowPredictions; },
-    get nowMinute() { return nowMinute; },
-    get lookbackHours() { return lookbackHours; },
-    get fullDataRange() { return fullDataRange; },
-    get displayDateRange() { return displayDateRange; },
-    get displayDateRangeWithPredictions() { return displayDateRangeWithPredictions; },
-    get fullXDomain() { return fullXDomain; },
-    get bolusMarkers() { return bolusMarkers; },
-    get carbMarkers() { return carbMarkers; },
-    get deviceEventMarkers() { return deviceEventMarkers; },
-    get basalInjectionMarkers() { return basalInjectionMarkers; },
-    get bgCheckMarkers() { return bgCheckMarkers; },
-    get iobData() { return iobData; },
-    get cobData() { return cobData; },
-    get basalData() { return basalData; },
-    get scheduledBasalData() { return scheduledBasalData; },
-    get maxIOB() { return maxIOB; },
-    get maxBasalRate() { return maxBasalRate; },
-    get lowThreshold() { return lowThreshold; },
-    get highThreshold() { return highThreshold; },
-    get veryHighThreshold() { return veryHighThreshold; },
-    get veryLowThreshold() { return veryLowThreshold; },
-    get glucoseYMax() { return glucoseYMax; },
-    get thresholds() {
-      return {
-        low: lowThreshold,
-        high: highThreshold,
-        veryLow: veryLowThreshold,
-        veryHigh: veryHighThreshold,
-        glucoseYMax,
-        targetLow,
-        targetHigh,
-      };
+  return createChartDataView({
+    get serverChartData() {
+      return serverChartData;
     },
-    get medianGlucose() { return medianGlucose; },
-    get displayPumpModeSpans() { return displayPumpModeSpans; },
-    get displayOverrideSpans() { return displayOverrideSpans; },
-    get displayProfileSpans() { return displayProfileSpans; },
-    get displayActivitySpans() { return displayActivitySpans; },
-    get displayTempBasalSpans() { return displayTempBasalSpans; },
-    get displayBasalDeliverySpans() { return displayBasalDeliverySpans; },
-    get displaySystemEvents() { return displaySystemEvents; },
-    get displayTrackerMarkers() { return displayTrackerMarkers; },
-    get staleBasalData() { return staleBasalData; },
-    get currentPumpMode() { return currentPumpMode; },
-    get uniquePumpModes() { return uniquePumpModes; },
-    finders,
-  };
+    get glucoseData() {
+      return glucoseData;
+    },
+    get thresholdsOverride() {
+      return realtimeThresholds;
+    },
+    get predictionData() {
+      return predictionData;
+    },
+    get predictionError() {
+      return predictionError;
+    },
+    get chartDataError() {
+      return chartDataError;
+    },
+    get predictionServiceAvailable() {
+      return predictionServiceAvailable;
+    },
+    get predictionAvailability() {
+      return predictionAvailability;
+    },
+    get effectiveShowPredictions() {
+      return effectiveShowPredictions;
+    },
+    get nowMinute() {
+      return nowMinute;
+    },
+    get lookbackHours() {
+      return lookbackHours;
+    },
+    get fullDataRange() {
+      return fullDataRange;
+    },
+    get displayDateRange() {
+      return displayDateRange;
+    },
+    get displayDateRangeWithPredictions() {
+      return displayDateRangeWithPredictions;
+    },
+    get fullXDomain() {
+      return fullXDomain;
+    },
+  }, options.onDataReady);
 }

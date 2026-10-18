@@ -46,6 +46,14 @@ public class EntryDecomposerTests : IDisposable
         GC.SuppressFinalize(this);
     }
 
+    [Fact]
+    public async Task DeleteStoredAsync_ARecordThatIsNotAnEntry_Throws()
+    {
+        var act = () => _decomposer.DeleteStoredAsync(new Note { Id = Guid.CreateVersion7() }, WriteOrigin.Live);
+
+        await act.Should().ThrowAsync<ArgumentException>().WithParameterName("stored");
+    }
+
     #region SGV Decomposition
 
     [Fact]
@@ -152,6 +160,40 @@ public class EntryDecomposerTests : IDisposable
         // Assert
         var sg = result.CreatedRecords[0].Should().BeOfType<SensorGlucose>().Subject;
         sg.Mgdl.Should().Be(110.0, "should fall back to Mgdl when Sgv is null");
+    }
+
+    [Theory]
+    [InlineData("NONE", 4, GlucoseDirection.None)]
+    [InlineData(null, 4, null)]
+    [InlineData("Sideways", 4, null)]
+    [InlineData("TripleUp", 1, null)]
+    [InlineData("TripleDown", 7, null)]
+    [InlineData("CGM ERROR", 4, null)]
+    [InlineData("SingleUp", 4, GlucoseDirection.SingleUp)]
+    [InlineData("NONE", 0, GlucoseDirection.None)]
+    [InlineData("NONE", 8, GlucoseDirection.None)]
+    [InlineData("NONE", 9, GlucoseDirection.None)]
+    public async Task DecomposeAsync_SgvEntryWithTrend_StoresDirectionAsUploaded(
+        string? direction, int trend, GlucoseDirection? expected)
+    {
+        var entry = new Entry
+        {
+            Id = "sgv-direction-as-uploaded",
+            Type = "sgv",
+            Mills = 1790000000000,
+            Sgv = 115.0,
+            Direction = direction,
+            Trend = trend
+        };
+
+        var result = await _decomposer.DecomposeAsync(entry, WriteOrigin.Live);
+
+        result.UpdatedRecords.Should().BeEmpty();
+        var sg = result.CreatedRecords.Should().ContainSingle().Which
+            .Should().BeOfType<SensorGlucose>().Subject;
+        sg.LegacyId.Should().Be("sgv-direction-as-uploaded");
+        sg.Mgdl.Should().Be(115.0);
+        sg.Direction.Should().Be(expected);
     }
 
     #endregion
@@ -367,6 +409,44 @@ public class EntryDecomposerTests : IDisposable
         result.CreatedRecords.Should().BeEmpty();
         result.UpdatedRecords.Should().BeEmpty();
         result.CorrelationId.Should().NotBeNull("a correlation ID is always generated");
+        result.SkippedUnsupported.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task DecomposeBatchAsync_CountsAnEntryOfAnUnsupportedTypeAsSkipped()
+    {
+        var entries = new[]
+        {
+            new Entry { Id = "batch-sgv", Type = "sgv", Mills = 1700000000000, Sgv = 120.0 },
+            new Entry { Id = "batch-sensor", Type = "sensor", Mills = 1700000060000 },
+        };
+
+        var result = await _decomposer.DecomposeBatchAsync(entries, WriteOrigin.Backfill);
+
+        result.CreatedRecords.Should().ContainSingle();
+        result.SkippedUnsupported.Should().Be(1);
+        result.SkippedDeleted.Should().Be(0);
+    }
+
+    /// <summary>
+    /// The re-import the user expects to restore a deleted reading does not, and the batch has to
+    /// say so rather than finish as if it had.
+    /// </summary>
+    [Fact]
+    public async Task DecomposeBatchAsync_CountsAReadingTheUserDeletedAsSkipped()
+    {
+        var entry = new Entry { Id = "batch-deleted", Type = "sgv", Mills = 1700000000000, Sgv = 120.0 };
+        await _decomposer.DecomposeBatchAsync([entry], WriteOrigin.Backfill);
+        var stored = _context.SensorGlucose.Single(e => e.LegacyId == "batch-deleted");
+        stored.DeletedAt = DateTime.UtcNow;
+        _context.Entry(stored).Property("DeletedByUser").CurrentValue = true;
+        await _context.SaveChangesAsync();
+        _context.ChangeTracker.Clear();
+
+        var result = await _decomposer.DecomposeBatchAsync([entry], WriteOrigin.Backfill);
+
+        result.CreatedRecords.Should().BeEmpty();
+        result.SkippedDeleted.Should().Be(1);
     }
 
     [Fact]

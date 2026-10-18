@@ -157,6 +157,155 @@ public class RlsShareCategoryTests
     }
 
     [Fact]
+    public async Task NonShare_HistoryClamped_SeesOnlyTheLast24Hours()
+    {
+        var tenant = Guid.NewGuid();
+        await SeedAsync(tenant);
+        await SeedOldGovernedRowAsync(tenant);
+        await SeedOldBolusAsync(tenant);
+
+        await using var conn = await _fx.OpenAppConnectionAsync();
+        await SetShareContextAsync(conn, tenant, isShare: false, visibleCategories: string.Empty,
+            historyClamped: "true");
+
+        (await CountAsync(conn, GovernedTable, tenant)).Should().Be(1,
+            "a clamped member sees only the step_counts rows from the last 24 hours");
+        (await CountAsync(conn, TreatmentTable, tenant)).Should().Be(1,
+            "a clamped member sees only the boluses from the last 24 hours");
+        (await CountAsync(conn, HiddenTable, tenant)).Should().Be(1,
+            "a table with no recency column is never clamped, so a clamped member sees it in full");
+    }
+
+    [Theory]
+    [InlineData("false")]
+    [InlineData(null)]
+    public async Task NonShare_NotHistoryClamped_SeesFullHistory(string? historyClamped)
+    {
+        // Fail-open: a connection that never sets app.history_clamped is not clamped.
+        var tenant = Guid.NewGuid();
+        await SeedAsync(tenant);
+        await SeedOldGovernedRowAsync(tenant);
+        await SeedOldBolusAsync(tenant);
+
+        await using var conn = await _fx.OpenAppConnectionAsync();
+        await SetShareContextAsync(conn, tenant, isShare: false, visibleCategories: string.Empty,
+            historyClamped: historyClamped);
+
+        (await CountAsync(conn, GovernedTable, tenant)).Should().Be(2);
+        (await CountAsync(conn, TreatmentTable, tenant)).Should().Be(2);
+    }
+
+    [Theory]
+    [InlineData("false")]
+    [InlineData(null)]
+    public async Task Share_WithoutFullHistory_IsClampedWhateverHistoryClampedSays(string? historyClamped)
+    {
+        var tenant = Guid.NewGuid();
+        await SeedAsync(tenant);
+        await SeedOldGovernedRowAsync(tenant);
+
+        await using var conn = await _fx.OpenAppConnectionAsync();
+        await SetShareContextAsync(conn, tenant, isShare: true, visibleCategories: GovernedScope,
+            historyClamped: historyClamped);
+
+        (await CountAsync(conn, GovernedTable, tenant)).Should().Be(1,
+            "a share's clamp is fail-closed on share_full_history alone");
+    }
+
+    [Fact]
+    public async Task Share_WithFullHistory_IsNotClampedWhenHistoryClampedIsFalse()
+    {
+        var tenant = Guid.NewGuid();
+        await SeedAsync(tenant);
+        await SeedOldGovernedRowAsync(tenant);
+
+        await using var conn = await _fx.OpenAppConnectionAsync();
+        await SetShareContextAsync(conn, tenant, isShare: true, visibleCategories: GovernedScope,
+            fullHistory: true, historyClamped: "false");
+
+        (await CountAsync(conn, GovernedTable, tenant)).Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Share_WithFullHistory_IsClampedWhenHistoryClampedIsTrue()
+    {
+        // The member clamp ORs into the clamp test, so it narrows even a full-history share.
+        var tenant = Guid.NewGuid();
+        await SeedAsync(tenant);
+        await SeedOldGovernedRowAsync(tenant);
+
+        await using var conn = await _fx.OpenAppConnectionAsync();
+        await SetShareContextAsync(conn, tenant, isShare: true, visibleCategories: GovernedScope,
+            fullHistory: true, historyClamped: "true");
+
+        (await CountAsync(conn, GovernedTable, tenant)).Should().Be(1);
+    }
+
+    /// <summary>
+    /// Spans are clamped by overlap: a profile switch still running from three days ago stays visible to
+    /// a clamped member, so the therapy resolvers still find it; one that ended two days ago does not.
+    /// </summary>
+    [Fact]
+    public async Task NonShare_HistoryClamped_SeesStateSpansOverlappingTheLast24Hours()
+    {
+        var tenant = Guid.NewGuid();
+        await SeedStateSpansAsync(tenant);
+
+        await using var conn = await _fx.OpenAppConnectionAsync();
+        await SetShareContextAsync(conn, tenant, isShare: false, visibleCategories: string.Empty,
+            historyClamped: "true");
+
+        (await StateSpanStatesAsync(conn, tenant)).Should().BeEquivalentTo(
+            new[] { "running-since-3-days", "ended-1-hour-ago" },
+            "a clamped member sees spans overlapping the last 24 hours, not one that ended two days ago");
+
+        await SetShareContextAsync(conn, tenant, isShare: false, visibleCategories: string.Empty,
+            historyClamped: "false");
+        (await StateSpanStatesAsync(conn, tenant)).Should().HaveCount(3, "an unclamped member sees every span");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Share_SeesNoStateSpans(bool fullHistory)
+    {
+        var tenant = Guid.NewGuid();
+        await SeedStateSpansAsync(tenant);
+
+        await using var conn = await _fx.OpenAppConnectionAsync();
+        await SetShareContextAsync(conn, tenant, isShare: true,
+            visibleCategories: "glucose.read,treatments.read,stepcount.read,devices.read", fullHistory: fullHistory);
+
+        (await StateSpanStatesAsync(conn, tenant)).Should().BeEmpty(
+            "state_spans has no governing scope, so no share sees it, running or not");
+    }
+
+    private async Task SeedStateSpansAsync(Guid tenantId)
+    {
+        await using var conn = await _fx.OpenMigratorConnectionAsync();
+        await InsertTenantAsync(conn, tenantId);
+        await SetCurrentTenantAsync(conn, tenantId);
+        await ExecuteAsync(conn,
+            "INSERT INTO state_spans (id, tenant_id, category, state, start_timestamp, end_timestamp, created_at, updated_at) VALUES " +
+            "(gen_random_uuid(), @tid, 'Profile', 'running-since-3-days', now() - interval '3 days', NULL, now(), now()), " +
+            "(gen_random_uuid(), @tid, 'Profile', 'ended-2-days-ago', now() - interval '4 days', now() - interval '2 days', now(), now()), " +
+            "(gen_random_uuid(), @tid, 'Override', 'ended-1-hour-ago', now() - interval '30 hours', now() - interval '1 hour', now(), now())",
+            tenantId);
+    }
+
+    private static async Task<List<string>> StateSpanStatesAsync(NpgsqlConnection conn, Guid tenantId)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT state FROM state_spans WHERE tenant_id = @tid";
+        AddParam(cmd, "@tid", tenantId);
+        var states = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            states.Add(reader.GetString(0));
+        return states;
+    }
+
+    [Fact]
     public async Task EveryTenantScopedTable_HasCorrectRestrictiveSelectSharePolicy()
     {
         await using var conn = await _fx.OpenMigratorConnectionAsync();
@@ -188,6 +337,23 @@ public class RlsShareCategoryTests
             {
                 usingExpr.Should().NotContain("visible_categories",
                     $"{table} is hidden from shares, so its policy must not be unlockable by any category");
+                if (ShareDataCategories.SpanEndColumnFor(table) is { } end)
+                {
+                    usingExpr.Should().Contain("history_clamped",
+                        $"{table} is hidden from shares but clamps a history-clamped member to 24 hours");
+                    usingExpr.Should().Contain($"{end} IS NULL",
+                        $"{table} is clamped by overlap, so a span still running stays visible");
+                }
+                else if (ShareDataCategories.RecencyColumnFor(table) is not null)
+                {
+                    usingExpr.Should().Contain("history_clamped",
+                        $"{table} is hidden from shares but clamps a history-clamped member to 24 hours");
+                }
+                else
+                {
+                    usingExpr.Should().NotContain("history_clamped",
+                        $"{table} is hidden from shares and unclamped, so its policy must not carry the clamp");
+                }
             }
             else
             {
@@ -196,10 +362,14 @@ public class RlsShareCategoryTests
                 {
                     usingExpr.Should().Contain("share_full_history",
                         $"{table} is time-series data, so its policy must clamp shares without full history to 24 hours");
+                    usingExpr.Should().Contain("history_clamped",
+                        $"{table} is time-series data, so its policy must clamp a history-clamped member to 24 hours");
                 }
                 else
                 {
                     usingExpr.Should().NotContain("share_full_history",
+                        $"{table} is deliberately unclamped (no per-row time), so its policy must not carry the clamp");
+                    usingExpr.Should().NotContain("history_clamped",
                         $"{table} is deliberately unclamped (no per-row time), so its policy must not carry the clamp");
                 }
             }
@@ -253,6 +423,15 @@ public class RlsShareCategoryTests
             "VALUES (gen_random_uuid(), @tid, now() - interval '30 hours', 0, 0, now(), now())", tenantId);
     }
 
+    private async Task SeedOldBolusAsync(Guid tenantId)
+    {
+        await using var conn = await _fx.OpenMigratorConnectionAsync();
+        await SetCurrentTenantAsync(conn, tenantId);
+        await ExecuteAsync(conn,
+            $"INSERT INTO {TreatmentTable} (id, tenant_id, timestamp, insulin, automatic, bolus_kind, sys_created_at, sys_updated_at) " +
+            "VALUES (gen_random_uuid(), @tid, now() - interval '30 hours', 1.0, false, 'Manual', now(), now())", tenantId);
+    }
+
     private static async Task InsertTenantAsync(NpgsqlConnection conn, Guid tenantId)
     {
         await using var cmd = conn.CreateCommand();
@@ -281,19 +460,24 @@ public class RlsShareCategoryTests
         await cmd.ExecuteScalarAsync();
     }
 
+    /// <param name="historyClamped">The <c>app.history_clamped</c> value, or null to leave it unset.</param>
     private static async Task SetShareContextAsync(
-        NpgsqlConnection conn, Guid tenantId, bool isShare, string visibleCategories, bool fullHistory = false)
+        NpgsqlConnection conn, Guid tenantId, bool isShare, string visibleCategories, bool fullHistory = false,
+        string? historyClamped = null)
     {
         await using var cmd = conn.CreateCommand();
         cmd.CommandText =
             "SELECT set_config('app.current_tenant_id', @tid, false), " +
             "set_config('app.is_share', @share, false), " +
             "set_config('app.visible_categories', @cats, false), " +
-            "set_config('app.share_full_history', @full_history, false)";
+            "set_config('app.share_full_history', @full_history, false)" +
+            (historyClamped is null ? "" : ", set_config('app.history_clamped', @history_clamped, false)");
         AddParam(cmd, "@tid", tenantId.ToString());
         AddParam(cmd, "@share", isShare ? "true" : "false");
         AddParam(cmd, "@cats", visibleCategories);
         AddParam(cmd, "@full_history", fullHistory ? "true" : "false");
+        if (historyClamped is not null)
+            AddParam(cmd, "@history_clamped", historyClamped);
         await cmd.ExecuteNonQueryAsync();
     }
 

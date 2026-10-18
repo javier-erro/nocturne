@@ -98,12 +98,6 @@ public class AlarmProfileConfiguration
     public AlarmReraiseSettings Reraise { get; set; } = new();
 
     /// <summary>
-    /// Smart snooze - auto-extend snooze if glucose is trending in the right direction
-    /// </summary>
-    [JsonPropertyName("smartSnooze")]
-    public SmartSnoozeSettings SmartSnooze { get; set; } = new();
-
-    /// <summary>
     /// Time-of-day schedule - when this alarm is active
     /// </summary>
     [JsonPropertyName("schedule")]
@@ -380,43 +374,6 @@ public class AlarmReraiseSettings
 }
 
 /// <summary>
-/// Smart snooze settings - auto-extend snooze when trending in right direction
-/// </summary>
-public class SmartSnoozeSettings
-{
-    /// <summary>
-    /// Whether smart snooze is enabled
-    /// </summary>
-    [JsonPropertyName("enabled")]
-    public bool Enabled { get; set; }
-
-    /// <summary>
-    /// For high alarms: auto-extend snooze if glucose is falling
-    /// For low alarms: auto-extend snooze if glucose is rising
-    /// </summary>
-    [JsonPropertyName("extendWhenTrendingCorrect")]
-    public bool ExtendWhenTrendingCorrect { get; set; } = true;
-
-    /// <summary>
-    /// Minimum delta (mg/dL per 5 min) to consider "trending correct"
-    /// </summary>
-    [JsonPropertyName("minDeltaThreshold")]
-    public int MinDeltaThreshold { get; set; } = 5;
-
-    /// <summary>
-    /// Extension duration in minutes when trending correct
-    /// </summary>
-    [JsonPropertyName("extensionMinutes")]
-    public int ExtensionMinutes { get; set; } = 15;
-
-    /// <summary>
-    /// Maximum total snooze time with extensions
-    /// </summary>
-    [JsonPropertyName("maxTotalMinutes")]
-    public int MaxTotalMinutes { get; set; } = 60;
-}
-
-/// <summary>
 /// Time-of-day schedule for when alarm is active
 /// </summary>
 public class AlarmScheduleSettings
@@ -642,49 +599,3 @@ public class PushoverChannelConfig : ChannelConfig
     [JsonPropertyName("apiToken")]
     public string? ApiToken { get; set; }
 }
-
-/// <summary>
-/// Built-in sound presets
-/// </summary>
-public static class BuiltInSounds
-{
-    /// <summary>Standard alarm sound.</summary>
-    public const string Default = "alarm-default";
-    /// <summary>Loud, attention-grabbing alarm for urgent conditions.</summary>
-    public const string Urgent = "alarm-urgent";
-    /// <summary>Warning tone for high glucose alerts.</summary>
-    public const string High = "alarm-high";
-    /// <summary>Warning tone for low glucose alerts.</summary>
-    public const string Low = "alarm-low";
-    /// <summary>General alert notification sound.</summary>
-    public const string Alert = "alert";
-    /// <summary>Pleasant chime notification.</summary>
-    public const string Chime = "chime";
-    /// <summary>Bell ring notification.</summary>
-    public const string Bell = "bell";
-    /// <summary>Emergency siren for critical conditions.</summary>
-    public const string Siren = "siren";
-    /// <summary>Simple beep notification.</summary>
-    public const string Beep = "beep";
-    /// <summary>Gentle, quiet notification for low-priority alerts.</summary>
-    public const string Soft = "soft";
-
-    public static readonly List<SoundPreset> All = new()
-    {
-        new(Default, "Default Alarm", "Standard alarm sound"),
-        new(Urgent, "Urgent Alarm", "Loud, attention-grabbing alarm"),
-        new(High, "High Alert", "Warning tone for high glucose"),
-        new(Low, "Low Alert", "Warning tone for low glucose"),
-        new(Alert, "Alert", "General alert sound"),
-        new(Chime, "Chime", "Pleasant chime"),
-        new(Bell, "Bell", "Bell ring"),
-        new(Siren, "Siren", "Emergency siren"),
-        new(Beep, "Beep", "Simple beep"),
-        new(Soft, "Soft", "Gentle, quiet notification"),
-    };
-}
-
-/// <summary>
-/// Sound preset metadata
-/// </summary>
-public record SoundPreset(string Id, string Name, string Description);

@@ -1,26 +1,32 @@
 <script lang="ts">
-  import { CalendarDays, Filter, SlidersHorizontal } from "lucide-svelte";
+  import CalendarDays from "@lucide/svelte/icons/calendar-days";
+  import Filter from "@lucide/svelte/icons/funnel";
+  import SlidersHorizontal from "@lucide/svelte/icons/sliders-horizontal";
   import * as Select from "$lib/components/ui/select";
   import { Button } from "$lib/components/ui/button";
   import * as Popover from "$lib/components/ui/popover";
   import { Checkbox } from "$lib/components/ui/checkbox";
   import { getDataTypeLabel } from "$lib/utils/data-type-labels";
 
-  let {
-    availableDataSources,
-    selectedDataSources = $bindable([]),
-    presentDataTypes,
-    hiddenDataTypes,
-    toggleDataType,
-    showAllDataTypes,
-  } = $props<{
+  interface Props {
+    disabled?: boolean;
     availableDataSources: string[];
     selectedDataSources: string[];
     presentDataTypes: string[];
     hiddenDataTypes: Set<string>;
     toggleDataType: (type: string) => void;
     showAllDataTypes: () => void;
-  }>();
+  }
+
+  let {
+    disabled = false,
+    availableDataSources,
+    selectedDataSources = $bindable([]),
+    presentDataTypes,
+    hiddenDataTypes,
+    toggleDataType,
+    showAllDataTypes,
+  }: Props = $props();
 </script>
 
 <div class="@container">
@@ -34,7 +40,6 @@
       <CalendarDays class="h-5 w-5 text-primary" />
     </div>
     <div>
-      <h1 class="text-2xl font-bold tracking-tight">Year Overview</h1>
       <p class="text-sm text-muted-foreground">
         Multi-year heatmap of all your data
       </p>
@@ -52,7 +57,7 @@
         onValueChange={(v) => {
           selectedDataSources = v ?? [];
         }}
-        disabled={availableDataSources.length === 0}
+        disabled={disabled || availableDataSources.length === 0}
       >
         <Select.Trigger class="w-[200px]">
           <span class="truncate">
@@ -64,7 +69,7 @@
           </span>
         </Select.Trigger>
         <Select.Content>
-          {#each availableDataSources as source}
+          {#each availableDataSources as source (source)}
             <Select.Item value={source}>
               {getDataTypeLabel(source)}
             </Select.Item>
@@ -78,12 +83,12 @@
       <Popover.Root>
         <Popover.Trigger>
           {#snippet child({ props }: { props: Record<string, unknown> })}
-            <Button variant="outline" size="sm" class="gap-1.5" {...props}>
+            <Button variant="outline" size="sm" {...props}>
               <SlidersHorizontal class="h-3.5 w-3.5" />
               Types
               {#if hiddenDataTypes.size > 0}
                 <span
-                  class="ml-1 rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-medium leading-none text-primary-foreground"
+                  class="ml-1 rounded-full bg-primary px-1.5 py-0.5 text-2xs font-medium leading-none text-primary-foreground"
                 >
                   {presentDataTypes.length -
                     hiddenDataTypes.size}/{presentDataTypes.length}
@@ -98,16 +103,13 @@
               Show data types
             </span>
             {#if hiddenDataTypes.size > 0}
-              <button
-                class="text-xs text-primary hover:underline"
-                onclick={showAllDataTypes}
-              >
+              <Button variant="link" size="inline" onclick={showAllDataTypes}>
                 Show all
-              </button>
+              </Button>
             {/if}
           </div>
           <div class="space-y-1.5">
-            {#each presentDataTypes as dataType}
+            {#each presentDataTypes as dataType (dataType)}
               <label
                 class="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-sm hover:bg-muted/50"
               >

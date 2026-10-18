@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
 using OpenApi.Remote.Attributes;
+using Nocturne.API.Authorization;
 using Nocturne.API.Extensions;
+using Nocturne.Core.Contracts.Multitenancy;
 
 namespace Nocturne.API.Controllers.V4.Identity;
 
@@ -25,16 +27,74 @@ namespace Nocturne.API.Controllers.V4.Identity;
 [Produces("application/json")]
 public class MyPermissionsController : ControllerBase
 {
+    private readonly ICategoryReadContext _categoryReadContext;
+
     /// <summary>
-    /// Get the caller's effective granted scopes for the current tenant.
+    /// Initializes a new instance of <see cref="MyPermissionsController"/>.
     /// </summary>
-    /// <returns>The list of granted scope strings for the caller on the current tenant.</returns>
+    /// <param name="categoryReadContext">Says whether the request is history-clamped.</param>
+    public MyPermissionsController(ICategoryReadContext categoryReadContext)
+    {
+        _categoryReadContext = categoryReadContext;
+    }
+
+    /// <summary>
+    /// Get the caller's effective granted scopes and history window for the current tenant.
+    /// </summary>
+    /// <returns>
+    /// The caller's granted scopes, whether it may read only the last 24 hours, and whether the
+    /// demo-subject gate refuses it.
+    /// </returns>
     [HttpGet]
     [RemoteQuery]
-    [ProducesResponseType(typeof(List<string>), StatusCodes.Status200OK)]
-    public ActionResult<List<string>> GetMyPermissions()
+    [ProducesResponseType(typeof(MyPermissionsResponse), StatusCodes.Status200OK)]
+    public async Task<ActionResult<MyPermissionsResponse>> GetMyPermissions()
     {
-        var scopes = HttpContext.GetGrantedScopes();
-        return Ok(scopes.ToList());
+        return Ok(await BuildAsync(HttpContext, _categoryReadContext));
     }
+
+    /// <summary>
+    /// The caller's grant, or null when the default-deny fallback would refuse this endpoint
+    /// (no non-empty permission trie). <see cref="OidcController.GetSession"/> carries it so a
+    /// session check needs no second round-trip to learn it.
+    /// </summary>
+    internal static async Task<MyPermissionsResponse?> TryBuildAsync(HttpContext httpContext)
+    {
+        if (httpContext.GetPermissionTrie() is not { IsEmpty: false })
+            return null;
+
+        return await BuildAsync(
+            httpContext,
+            httpContext.RequestServices.GetRequiredService<ICategoryReadContext>());
+    }
+
+    private static async Task<MyPermissionsResponse> BuildAsync(
+        HttpContext httpContext,
+        ICategoryReadContext categoryReadContext) => new()
+    {
+        Scopes = httpContext.GetGrantedScopes().ToList(),
+        LimitTo24Hours = categoryReadContext.IsHistoryClamped,
+        RefusedAsDemoSubject = await DenyDemoSubjectAttribute.RefusesAsync(httpContext),
+    };
+}
+
+/// <summary>
+/// What the caller may read on the current tenant.
+/// </summary>
+public class MyPermissionsResponse
+{
+    /// <summary>The granted scope strings.</summary>
+    public List<string> Scopes { get; set; } = [];
+
+    /// <summary>
+    /// True when the caller may read only the last 24 hours of time-series data, whether a share
+    /// without full history or a clamped member or credential.
+    /// </summary>
+    public bool LimitTo24Hours { get; set; }
+
+    /// <summary>
+    /// True when the caller is the demo tenant's shared visitor account, which every
+    /// <see cref="DenyDemoSubjectAttribute"/> endpoint refuses whatever <see cref="Scopes"/> grants.
+    /// </summary>
+    public bool RefusedAsDemoSubject { get; set; }
 }

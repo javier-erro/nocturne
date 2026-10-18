@@ -1,9 +1,10 @@
 import type {
+  ChartBasalPoint,
   SeriesFinders,
   GlucosePoint,
   SeriesPoint,
-} from "./chart-data-engine.svelte";
-import { type BasalPoint, BasalDeliveryOrigin } from "$lib/api";
+} from "./chart-data-view.svelte";
+import { BasalDeliveryOrigin } from "$api-clients";
 import {
   bg,
   bgLabel,
@@ -74,7 +75,7 @@ export interface PointInspection {
 export interface InspectionSeriesData {
   iobData: () => SeriesPoint[];
   cobData: () => SeriesPoint[];
-  basalData: () => BasalPoint[];
+  basalData: () => ChartBasalPoint[];
 }
 
 // ===== Factory =====
@@ -136,10 +137,7 @@ export function createPointInspection(
     timestamp = time;
     glucosePoint = point;
 
-    const basal = finders.findBasalValue(
-      seriesData.basalData(),
-      time,
-    ) as BasalPoint | undefined;
+    const basal = finders.findBasalValue(seriesData.basalData(), time);
     const iobVal = finders.findSeriesValue(seriesData.iobData(), time);
     const cobVal = finders.findSeriesValue(seriesData.cobData(), time);
     const pumpMode = finders.findActivePumpMode(time);
@@ -247,4 +245,38 @@ export function createPointInspection(
     navigateTo,
     close,
   };
+}
+
+/**
+ * Opens the dialog `activeDialog` names and closes the others. A dialog that drops its own `open`
+ * while still active (dismissed, or its import failed) closes the inspection, so the next inspect
+ * is a real change and opens it again.
+ *
+ * Call during component initialization: the watcher is an `$effect`.
+ */
+export function syncInspectionDialogs(
+  inspection: () => PointInspection | undefined,
+  dialogs: Record<"glucose" | "delivery" | "treatment", { open: boolean }>,
+): void {
+  let last: InspectionDialog = null;
+
+  $effect(() => {
+    const current = inspection();
+    const active = current?.activeDialog ?? null;
+    // Read on every run, so a dialog dropping its `open` re-runs this.
+    const shown = {
+      picker: true,
+      glucose: dialogs.glucose.open,
+      delivery: dialogs.delivery.open,
+      treatment: dialogs.treatment.open,
+    };
+    if (active !== last) {
+      last = active;
+      dialogs.glucose.open = active === "glucose";
+      dialogs.delivery.open = active === "delivery";
+      dialogs.treatment.open = active === "treatment";
+    } else if (active && !shown[active]) {
+      current?.close();
+    }
+  });
 }

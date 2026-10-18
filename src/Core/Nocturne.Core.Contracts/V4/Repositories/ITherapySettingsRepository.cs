@@ -21,7 +21,7 @@ public interface ITherapySettingsRepository : IProfileScopedRepository<TherapySe
 {
     /// <summary>Retrieve a page of <see cref="TherapySettings"/> records filtered by time range, device, and source.</summary>
     /// <param name="from">Inclusive start of the time window, or <c>null</c> for no lower bound.</param>
-    /// <param name="to">Exclusive end of the time window, or <c>null</c> for no upper bound.</param>
+    /// <param name="to">Inclusive end of the time window, or <c>null</c> for no upper bound.</param>
     /// <param name="device">Optional device identifier filter.</param>
     /// <param name="source">Optional data source filter.</param>
     /// <param name="limit">Maximum number of records to return (default 100).</param>
@@ -38,4 +38,48 @@ public interface ITherapySettingsRepository : IProfileScopedRepository<TherapySe
         bool descending = true,
         CancellationToken ct = default
     );
+
+    /// <summary>The rows currently flagged <see cref="TherapySettings.IsDefault"/>, newest first.</summary>
+    /// <param name="ct">Cancellation token.</param>
+    Task<IReadOnlyList<TherapySettings>> GetDefaultsAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// The newest row decomposed from a profile document, leaving out profile-switch snapshots
+    /// (see <see cref="TherapySettings.ProfileSwitchStoreMarker"/>).
+    /// </summary>
+    /// <param name="ct">Cancellation token.</param>
+    Task<TherapySettings?> GetNewestDocumentRowAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// The live rows whose legacy id starts with <paramref name="prefix"/>, newest first: for
+    /// <c>"{profileId}:"</c>, the stores of one profile document still standing.
+    /// </summary>
+    /// <param name="prefix">Legacy id prefix to match.</param>
+    /// <param name="ct">Cancellation token.</param>
+    Task<IEnumerable<TherapySettings>> GetByLegacyIdPrefixAsync(string prefix, CancellationToken ct = default);
+
+    /// <summary>
+    /// The ids of the stored profile documents (see <see cref="TherapySettings.DocumentIdOf"/>), newest
+    /// first as Nightscout sorts them: by time descending, then by <c>_id</c> descending. Profile-switch
+    /// snapshots are not documents and are left out.
+    /// </summary>
+    /// <param name="ct">Cancellation token.</param>
+    Task<IReadOnlyList<string>> GetDocumentIdsAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// The live rows of the profile document <paramref name="documentId"/>, one per named store,
+    /// resolved as <see cref="TherapySettings.DocumentIdOf"/> reads them and leaving out profile-switch
+    /// snapshots.
+    /// </summary>
+    /// <param name="documentId">The document's <c>_id</c>.</param>
+    /// <param name="ct">Cancellation token.</param>
+    Task<IReadOnlyList<TherapySettings>> GetDocumentRowsAsync(string documentId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Makes the row <paramref name="id"/> the tenant's only <see cref="TherapySettings.IsDefault"/> row,
+    /// or clears the flag on every row when <paramref name="id"/> is <c>null</c>.
+    /// </summary>
+    /// <param name="id">The therapy settings row to flag, or <c>null</c> for none.</param>
+    /// <param name="ct">Cancellation token.</param>
+    Task SetDefaultAsync(Guid? id, CancellationToken ct = default);
 }

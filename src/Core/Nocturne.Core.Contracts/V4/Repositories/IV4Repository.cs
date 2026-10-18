@@ -21,7 +21,7 @@ public interface IV4Repository<T> where T : class, IV4Record
     /// Retrieve a page of records filtered by time range, device, and data source.
     /// </summary>
     /// <param name="from">Inclusive start of the time window, or <c>null</c> for no lower bound.</param>
-    /// <param name="to">Exclusive end of the time window, or <c>null</c> for no upper bound.</param>
+    /// <param name="to">Inclusive end of the time window, or <c>null</c> for no upper bound.</param>
     /// <param name="device">Optional device identifier filter.</param>
     /// <param name="source">Optional data source filter (e.g., connector name).</param>
     /// <param name="limit">Maximum number of records to return.</param>
@@ -76,7 +76,8 @@ public interface IV4Repository<T> where T : class, IV4Record
     Task<T> UpdateAsync(Guid id, T model, WriteOrigin origin, CancellationToken ct = default);
 
     /// <summary>
-    /// Delete the record with the given identifier.
+    /// Delete the record with the given identifier, and every other source's copy deduplication
+    /// linked it to.
     /// </summary>
     /// <param name="id">UUID v7 identifier of the record to delete.</param>
     /// <param name="origin">Whether this is a live write (broadcast) or a backfill import (silent).</param>
@@ -91,6 +92,9 @@ public interface IV4Repository<T> where T : class, IV4Record
     /// <param name="ct">Cancellation token.</param>
     /// <returns>The restored record.</returns>
     /// <exception cref="KeyNotFoundException">If no soft-deleted record with the given ID exists.</exception>
+    /// <exception cref="RecreationBlockedException">
+    /// A live record already holds a unique key the restored one would take, so it stays deleted.
+    /// </exception>
     Task<T> RestoreAsync(Guid id, WriteOrigin origin, CancellationToken ct = default);
 
     /// <summary>
@@ -99,8 +103,11 @@ public interface IV4Repository<T> where T : class, IV4Record
     /// <param name="ids">UUID v7 identifiers of the soft-deleted records.</param>
     /// <param name="origin">Whether this is a live write (broadcast) or a backfill import (silent).</param>
     /// <param name="ct">Cancellation token.</param>
-    /// <returns>The restored records (only those that were actually soft-deleted).</returns>
-    Task<IEnumerable<T>> BulkRestoreAsync(IEnumerable<Guid> ids, WriteOrigin origin, CancellationToken ct = default);
+    /// <returns>
+    /// The restored records (only those that were actually soft-deleted), and the ids left deleted
+    /// per <see cref="BulkRestoreResult{T}.Conflicts"/>.
+    /// </returns>
+    Task<BulkRestoreResult<T>> BulkRestoreAsync(IEnumerable<Guid> ids, WriteOrigin origin, CancellationToken ct = default);
 
     /// <summary>
     /// Retrieve soft-deleted records for the "trash" view, ordered by deletion date (newest first).
@@ -122,7 +129,7 @@ public interface IV4Repository<T> where T : class, IV4Record
     /// Count records within an optional time range.
     /// </summary>
     /// <param name="from">Inclusive start of the time window, or <c>null</c> for no lower bound.</param>
-    /// <param name="to">Exclusive end of the time window, or <c>null</c> for no upper bound.</param>
+    /// <param name="to">Inclusive end of the time window, or <c>null</c> for no upper bound.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>Number of records in the range.</returns>
     Task<int> CountAsync(DateTime? from, DateTime? to, CancellationToken ct = default);

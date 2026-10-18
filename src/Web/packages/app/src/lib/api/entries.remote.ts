@@ -15,7 +15,7 @@ export const getEntries = query(entriesSchema, async (props) => {
   const { from = new Date(), to = new Date() } = props.dateRange;
   if (!from || !to) throw new Error("Invalid date range");
 
-  const response = await apiClient.sensorGlucose.getAll(from, to, 10000);
+  const response = await apiClient.sensorGlucose.getAll(from.toISOString(), to.toISOString(), 10000);
   return response.data ?? [];
 });
 
@@ -27,40 +27,14 @@ export const getBolusesAndCarbs = query(entriesSchema, async (props) => {
   if (!from || !to) throw new Error("Invalid date range");
 
   const [bolusResponse, carbResponse] = await Promise.all([
-    apiClient.bolus.getAll(from, to, 10000),
-    apiClient.nutrition.getCarbIntakes(from, to, 10000),
+    apiClient.bolus.getAll(from.toISOString(), to.toISOString(), 10000),
+    apiClient.nutrition.getCarbIntakes(from.toISOString(), to.toISOString(), 10000),
   ]);
 
   return {
     boluses: bolusResponse.data ?? [],
     carbIntakes: carbResponse.data ?? [],
   };
-});
-
-export const getStats = query(entriesSchema, async (props) => {
-  const { locals } = getRequestEvent();
-  const { apiClient } = locals;
-
-  const { from = new Date(), to = new Date() } = props.dateRange;
-  if (!from || !to) throw new Error("Invalid date range");
-
-  const [entriesResponse, bolusResponse, carbResponse] = await Promise.all([
-    apiClient.sensorGlucose.getAll(from, to, 10000),
-    apiClient.bolus.getAll(from, to, 10000),
-    apiClient.nutrition.getCarbIntakes(from, to, 10000),
-  ]);
-
-  const entries = entriesResponse.data ?? [];
-  const boluses = bolusResponse.data ?? [];
-  const carbIntakes = carbResponse.data ?? [];
-
-  const stats = apiClient.statistics.analyzeGlucoseData({
-    entries,
-    boluses,
-    carbIntakes,
-  });
-
-  return stats;
 });
 
 const treatmentIdSchema = z.object({

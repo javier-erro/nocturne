@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { isRecord } from "$lib/utils/type-guards";
   import type { Bolus, CarbIntake, BGCheck, Note, DeviceEvent, BasalInjection } from "$lib/api";
   import { BolusType, GlucoseType, GlucoseUnit, DeviceEventType } from "$lib/api";
   import type { EntryRecord, EntryCategoryId } from "$lib/constants/entry-categories";
@@ -18,18 +19,17 @@
   import NoteSection from "./NoteSection.svelte";
   import DeviceEventSection from "./DeviceEventSection.svelte";
   import BasalInjectionSection from "./BasalInjectionSection.svelte";
-  import {
-    Plus,
-    Trash2,
-    Loader2,
-    Syringe,
-    Apple,
-    Droplet,
-    FileText,
-    Smartphone,
-  } from "lucide-svelte";
+  import Plus from "@lucide/svelte/icons/plus";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
+  import Loader2 from "@lucide/svelte/icons/loader-circle";
+  import Syringe from "@lucide/svelte/icons/syringe";
+  import Apple from "@lucide/svelte/icons/apple";
+  import Droplet from "@lucide/svelte/icons/droplet";
+  import FileText from "@lucide/svelte/icons/file-text";
+  import Smartphone from "@lucide/svelte/icons/smartphone";
   import { getDataSourceDisplayName } from "$lib/utils/data-source-display";
   import { toast } from "svelte-sonner";
+  import { tryGetRealtimeStore } from "$lib/stores/realtime-store.svelte";
   import { useToastSubmission } from "$lib/forms";
   import {
     create as createBolusForm,
@@ -62,6 +62,8 @@
     update as updateBasalInjectionForm,
     remove as deleteBasalInjection,
   } from "$api/generated/basalInjections.generated.remote";
+
+  const realtimeStore = tryGetRealtimeStore();
 
   interface Sections {
     bolus: Partial<Bolus> | null;
@@ -131,20 +133,24 @@
     entry ? getDataSourceDisplayName(entry.data.dataSource ?? entry.data.device) : null,
   );
 
+  function isEntryCategoryId(key: string): key is EntryCategoryId {
+    return Object.hasOwn(ENTRY_CATEGORIES, key);
+  }
+
   let activeSectionCount = $derived(
     Object.values(sections).filter((s) => s != null).length,
   );
 
   let activeSectionKeys = $derived(
-    (Object.keys(sections) as EntryCategoryId[]).filter(
-      (k) => sections[k] != null,
-    ),
+    Object.keys(sections)
+      .filter(isEntryCategoryId)
+      .filter((k) => sections[k] != null),
   );
 
   let inactiveSectionKeys = $derived(
-    (Object.keys(ENTRY_CATEGORIES) as EntryCategoryId[]).filter(
-      (k) => sections[k] == null,
-    ),
+    Object.keys(ENTRY_CATEGORIES)
+      .filter(isEntryCategoryId)
+      .filter((k) => sections[k] == null),
   );
 
   // Determine which form to use per section (create vs update)
@@ -406,7 +412,10 @@
         }
       }
 
-      await Promise.all(promises);
+      const settled = await Promise.allSettled(promises);
+      if (settled.some((r) => r.status === "fulfilled")) realtimeStore?.noteTreatmentWrite();
+      const failed = settled.find((r) => r.status === "rejected");
+      if (failed) throw failed.reason;
       toast.success("Entry deleted");
       open = false;
       onClose();
@@ -423,6 +432,7 @@
     {...activeBolusForm.enhance(async ({ submit }) => {
       await submit();
       if (activeBolusForm.result) {
+        realtimeStore?.noteTreatmentWrite();
         bolusFormDone = true;
       } else {
         saveError = "Failed to save bolus";
@@ -467,10 +477,11 @@
       await submit();
       const result = activeCarbsForm.result;
       if (result) {
+        realtimeStore?.noteTreatmentWrite();
         // If creating with pending foods, add them
         if (!existingCarbsRecord?.data.id && carbsPendingFoods.length > 0) {
-          const newId = (result as any)?.id;
-          if (newId) {
+          const newId = isRecord(result) ? result.id : undefined;
+          if (typeof newId === "string" && newId) {
             for (const pf of carbsPendingFoods) {
               await addCarbIntakeFood({ id: newId, request: pf.request });
             }
@@ -509,6 +520,7 @@
     {...activeBGCheckForm.enhance(async ({ submit }) => {
       await submit();
       if (activeBGCheckForm.result) {
+        realtimeStore?.noteTreatmentWrite();
         bgCheckFormDone = true;
       } else {
         saveError = "Failed to save BG check";
@@ -538,6 +550,7 @@
     {...activeNoteForm.enhance(async ({ submit }) => {
       await submit();
       if (activeNoteForm.result) {
+        realtimeStore?.noteTreatmentWrite();
         noteFormDone = true;
       } else {
         saveError = "Failed to save note";
@@ -566,6 +579,7 @@
     {...activeDeviceEventForm.enhance(async ({ submit }) => {
       await submit();
       if (activeDeviceEventForm.result) {
+        realtimeStore?.noteTreatmentWrite();
         deviceEventFormDone = true;
       } else {
         saveError = "Failed to save device event";
@@ -596,6 +610,7 @@
     {...activeBasalInjectionForm.enhance(async ({ submit }) => {
       await submit();
       if (activeBasalInjectionForm.result) {
+        realtimeStore?.noteTreatmentWrite();
         basalInjectionFormDone = true;
       } else {
         saveError = "Failed to save basal injection";
@@ -628,7 +643,7 @@
   <Sheet.Root bind:open onOpenChange={(o) => !o && onClose()}>
     <Sheet.Content
       side="bottom"
-      class="max-h-[90vh] overflow-y-auto rounded-t-xl p-6"
+      class="max-h-[90vh] overflow-y-auto p-6"
     >
       {@render dialogBody()}
     </Sheet.Content>
