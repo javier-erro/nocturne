@@ -7,8 +7,10 @@ namespace Nocturne.API.Tests.Infrastructure;
 
 /// <summary>
 /// <see cref="INocturneDbContextFactory.CreateSystemPinnedAsync"/> reads as no reader, past every
-/// share and history narrowing, so it is limited to the files listed here; its remarks give the
-/// reason. A new caller is added here deliberately or not at all.
+/// share and history narrowing, so it is limited to the members listed here; its remarks give the
+/// reason. An entry names the file and the member the call sits in, so a new action in an
+/// allowlisted file is not covered by its neighbour. A new caller is added here deliberately or not
+/// at all.
 /// </summary>
 [Trait("Category", "Unit")]
 public class SystemPinnedAllowlistTests
@@ -19,10 +21,11 @@ public class SystemPinnedAllowlistTests
 
     private static readonly string[] Allowed =
     [
-        "src/API/Nocturne.API/Middleware/TenantSetupMiddleware.cs",
-        "src/API/Nocturne.API/Controllers/Authentication/PasskeyController.cs",
-        "src/API/Nocturne.API/Services/Identity/InstanceSetupState.cs",
-        "src/API/Nocturne.API/Services/Auth/PublicAccessCacheService.cs",
+        "src/API/Nocturne.API/Middleware/TenantSetupMiddleware.cs: TenantSetupMiddleware.EvaluateGateAsync",
+        "src/API/Nocturne.API/Controllers/Authentication/PasskeyController.cs: PasskeyController.TenantHasCredentialsAsync",
+        "src/API/Nocturne.API/Controllers/Authentication/PasskeyController.cs: PasskeyController.HasOrphanedSubjectAsync",
+        "src/API/Nocturne.API/Controllers/Authentication/PasskeyController.cs: PasskeyController.AccessRequestComplete",
+        "src/API/Nocturne.API/Services/Identity/InstanceSetupState.cs: InstanceSetupState.TenantHasCredentialedMemberAsync",
     ];
 
     private static readonly IReadOnlyList<string> Callers = Scan();
@@ -37,33 +40,77 @@ public class SystemPinnedAllowlistTests
     [Fact]
     public void EveryAllowlistEntryStillCallsIt()
     {
-        Allowed.Except(Callers).Should().BeEmpty("a stale entry would silently cover a future call in that file");
+        Allowed.Except(Callers).Should().BeEmpty("a stale entry would silently cover a future call in that member");
     }
 
     [Theory]
-    [InlineData("class C { async Task M(INocturneDbContextFactory f) => await f.CreateSystemPinnedAsync(id); }", true)]
-    [InlineData("class C { async Task M(INocturneDbContextFactory? f) => await f?.CreateSystemPinnedAsync(id); }", true)]
-    [InlineData("class C { Func<Guid, CancellationToken, ValueTask<NocturneDbContext>> M(INocturneDbContextFactory f) => f.CreateSystemPinnedAsync; }", true)]
-    [InlineData("class C { void M() => Use(CreateSystemPinnedAsync); }", true)]
-    [InlineData("class C { async Task M(INocturneDbContextFactory f) => await f.CreateForTenantAsync(id); }", false)]
-    public void DetectsACall(string source, bool expected) =>
-        Calls(CSharpSyntaxTree.ParseText(source)).Should().Be(expected);
+    [InlineData("class C { async Task M(INocturneDbContextFactory f) => await f.CreateSystemPinnedAsync(id); }", "C.M")]
+    [InlineData("class C { async Task M(INocturneDbContextFactory? f) => await f?.CreateSystemPinnedAsync(id); }", "C.M")]
+    [InlineData("class C { Func<Guid, CancellationToken, ValueTask<NocturneDbContext>> M(INocturneDbContextFactory f) => f.CreateSystemPinnedAsync; }", "C.M")]
+    [InlineData("class C { void M() => Use(CreateSystemPinnedAsync); }", "C.M")]
+    [InlineData("class C { void M() { async Task Local() => await f.CreateSystemPinnedAsync(id); } }", "C.M")]
+    [InlineData("class C { C(INocturneDbContextFactory f) => f.CreateSystemPinnedAsync(id); }", "C.C")]
+    [InlineData("class C { Task P => f.CreateSystemPinnedAsync(id).AsTask(); }", "C.P")]
+    [InlineData("class C { Func<Task> F = () => f.CreateSystemPinnedAsync(id).AsTask(); }", "C.F")]
+    [InlineData("class O { class C { void M() => f.CreateSystemPinnedAsync(id); } }", "O.C.M")]
+    [InlineData("class C { async Task M(INocturneDbContextFactory f) => await f.CreateForTenantAsync(id); }", null)]
+    public void FindsTheCallingMember(string source, string? expected)
+    {
+        var members = CallingMembers(CSharpSyntaxTree.ParseText(source));
+
+        if (expected is null)
+            members.Should().BeEmpty();
+        else
+            members.Should().Equal(expected);
+    }
 
     /// <summary>
-    /// Any mention of the method by name: a call, a conditional call (<c>f?.Method(...)</c>) or a
-    /// method group passed on.
+    /// The member around every mention of the method by name: a call, a conditional call
+    /// (<c>f?.Method(...)</c>) or a method group passed on. A local function or lambda counts as
+    /// the member it is written in.
     /// </summary>
-    private static bool Calls(SyntaxTree syntax) =>
+    private static List<string> CallingMembers(SyntaxTree syntax) =>
         syntax.GetRoot()
             .DescendantNodes()
-            .Any(node => node switch
+            .Where(node => node switch
             {
                 MemberAccessExpressionSyntax member => member.Name.Identifier.ValueText == Method,
                 MemberBindingExpressionSyntax binding => binding.Name.Identifier.ValueText == Method,
                 IdentifierNameSyntax name => name.Identifier.ValueText == Method
                     && name.Parent is not (MemberAccessExpressionSyntax or MemberBindingExpressionSyntax),
                 _ => false,
-            });
+            })
+            .Select(MemberName)
+            .Distinct()
+            .ToList();
+
+    private static string MemberName(SyntaxNode node)
+    {
+        var member = node.Ancestors().OfType<MemberDeclarationSyntax>()
+            .FirstOrDefault(m => m is not BaseTypeDeclarationSyntax);
+
+        var name = member switch
+        {
+            null => "(type)",
+            MethodDeclarationSyntax method => method.Identifier.ValueText,
+            ConstructorDeclarationSyntax constructor => constructor.Identifier.ValueText,
+            BasePropertyDeclarationSyntax property => property switch
+            {
+                PropertyDeclarationSyntax p => p.Identifier.ValueText,
+                EventDeclarationSyntax e => e.Identifier.ValueText,
+                _ => "this[]",
+            },
+            BaseFieldDeclarationSyntax field => string.Join(",", field.Declaration.Variables.Select(v => v.Identifier.ValueText)),
+            OperatorDeclarationSyntax op => $"operator {op.OperatorToken.ValueText}",
+            _ => member.Kind().ToString(),
+        };
+
+        var types = (member ?? node).Ancestors().OfType<BaseTypeDeclarationSyntax>()
+            .Reverse()
+            .Select(type => type.Identifier.ValueText);
+
+        return string.Join(".", types.Append(name));
+    }
 
     private static List<string> Scan()
     {
@@ -82,8 +129,9 @@ public class SystemPinnedAllowlistTests
                 if (!text.Contains(Method, StringComparison.Ordinal))
                     continue;
 
-                if (Calls(CSharpSyntaxTree.ParseText(text)))
-                    callers.Add(Path.GetRelativePath(root, path).Replace('\\', '/'));
+                var file = Path.GetRelativePath(root, path).Replace('\\', '/');
+                callers.AddRange(CallingMembers(CSharpSyntaxTree.ParseText(text))
+                    .Select(member => $"{file}: {member}"));
             }
         }
 

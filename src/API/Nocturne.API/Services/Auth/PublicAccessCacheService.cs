@@ -86,8 +86,10 @@ public sealed class PublicAccessCacheService
 
     private async Task<PublicAccessInfo?> ResolvePublicAccessAsync(Guid tenantId)
     {
-        // System-pinned: read on the anonymous-share request path to decide what the share may see.
-        await using var dbContext = await _dbContextFactory.CreateSystemPinnedAsync(tenantId);
+        // A singleton's factory is the root one, so this reads as no reader whatever request first
+        // misses the cache: the Public subject's grants decide what a share may see, and a share
+        // could not read them.
+        await using var dbContext = await _dbContextFactory.CreateForTenantAsync(tenantId);
 
         var membership = await dbContext.TenantMembers
             .AsNoTracking()

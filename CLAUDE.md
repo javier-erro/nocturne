@@ -269,9 +269,9 @@ Every context comes from `INocturneDbContextFactory`:
 A pin replaces only the tenant or subject: share, clamp and audit state always come from the
 scope, so a pin can narrow what a reader sees but never widen it. The one exception is
 `CreateSystemPinnedAsync(tenantId)`, a tenant pin that reads as no reader, for an allowlist of
-instance-level reads (`TenantSetupMiddleware`, `PasskeyController`, `InstanceSetupState`,
-`PublicAccessCacheService`; pinned by `SystemPinnedAllowlistTests`). Its remarks give the
-reason.
+instance-level reads (members of `TenantSetupMiddleware`, `PasskeyController` and
+`InstanceSetupState`; pinned per member by `SystemPinnedAllowlistTests`). Its remarks give the
+reason. A singleton needs no system pin: its root-resolved factory already reads as no reader.
 
 The factory is transient. Resolved from the root (singletons, hosted services, middleware
 constructors) it has no scope, and its contexts read fail-closed defaults: empty tenant,

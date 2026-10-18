@@ -43,9 +43,4 @@ internal sealed class TenantReadContext(
     public bool HistoryClamped => categoryReadContext?.IsHistoryClamped == true;
 
     public IAuditContext? AuditContext => auditContext;
-
-    /// <summary>
-    /// This scope's audit actor with none of its reader state: not a share, no categories, no clamp.
-    /// </summary>
-    public TenantReadContext WithoutReader() => new(null, null, auditContext);
 }

@@ -45,13 +45,13 @@ public interface INocturneDbContextFactory
     /// </summary>
     /// <remarks>
     /// For an allowlist of instance-level reads that a public-share request needs answered but may
-    /// not see as a reader: whether the tenant is past setup or has an orphaned member, its owners,
-    /// and the Public subject's grants that define what a share may see. The identity tables these
-    /// read (tenant_members, member_roles, tenant_roles, subjects, passkey credentials, OIDC
-    /// identities) are not tenant-scoped and carry no Row Level Security today, so a tenant pin
-    /// returns the same rows; this entry point keeps those reads working when they come under it,
-    /// since a share is hidden every table no category governs. <c>SystemPinnedAllowlistTests</c>
-    /// pins the callers.
+    /// not see as a reader: whether the tenant is past setup or has an orphaned member, and its
+    /// owners. A singleton has no use for it, since its root-resolved factory already reads as no
+    /// reader. The identity tables these read (tenant_members, member_roles, tenant_roles,
+    /// subjects, passkey credentials, OIDC identities) are not tenant-scoped and carry no Row Level
+    /// Security today, so a tenant pin returns the same rows; this entry point keeps those reads
+    /// working when they come under it, since a share is hidden every table no category governs.
+    /// <c>SystemPinnedAllowlistTests</c> pins the calling members.
     /// </remarks>
     ValueTask<NocturneDbContext> CreateSystemPinnedAsync(Guid tenantId, CancellationToken ct = default);
 }
@@ -106,7 +106,7 @@ internal sealed class NocturneDbContextFactory(
     public ValueTask<NocturneDbContext> CreateSystemPinnedAsync(Guid tenantId, CancellationToken ct = default)
     {
         var context = contexts.CreateDbContext();
-        context.ReadContext = _readContext.WithoutReader();
+        context.ReadContext = new TenantReadContext(null, null, _readContext.AuditContext);
         context.TenantId = tenantId;
         return ValueTask.FromResult(context);
     }
