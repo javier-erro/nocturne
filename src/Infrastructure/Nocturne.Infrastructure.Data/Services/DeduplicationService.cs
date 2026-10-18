@@ -25,7 +25,7 @@ public class DeduplicationService : IDeduplicationService
 {
     private const string JobAuditEndpoint = "service:deduplication";
 
-    private readonly NocturneDbContext _context;
+    private readonly INocturneDbContextFactory _contexts;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ICategoryReadContext? _categoryReadContext;
     private readonly ILogger<DeduplicationService> _logger;
@@ -185,13 +185,13 @@ public class DeduplicationService : IDeduplicationService
 
     /// <inheritdoc cref="IDeduplicationService" />
     public DeduplicationService(
-        NocturneDbContext context,
+        INocturneDbContextFactory contexts,
         IServiceScopeFactory scopeFactory,
         ILogger<DeduplicationService> logger,
         ITenantAccessor? tenantAccessor = null,
         ICategoryReadContext? categoryReadContext = null)
     {
-        _context = context;
+        _contexts = contexts ?? throw new ArgumentNullException(nameof(contexts));
         _scopeFactory = scopeFactory;
         _logger = logger;
         _tenantAccessor = tenantAccessor;
@@ -222,7 +222,8 @@ public class DeduplicationService : IDeduplicationService
     /// group is read rather than just the links inside a matching window, so a same-source record
     /// sitting outside the window still blocks a wide match.
     /// </summary>
-    private async Task<Dictionary<Guid, HashSet<string>>> LoadGroupSourcesAsync(
+    private static async Task<Dictionary<Guid, HashSet<string>>> LoadGroupSourcesAsync(
+        NocturneDbContext db,
         string recordTypeStr,
         List<Guid> canonicalIds,
         CancellationToken ct)
@@ -231,7 +232,7 @@ public class DeduplicationService : IDeduplicationService
         if (canonicalIds.Count == 0)
             return sourcesByCanonical;
 
-        var rows = await _context.LinkedRecords
+        var rows = await db.LinkedRecords
             .AsNoTracking()
             .Where(lr => lr.RecordType == recordTypeStr && canonicalIds.Contains(lr.CanonicalId))
             .Select(lr => new { lr.CanonicalId, lr.DataSource })
@@ -260,7 +261,8 @@ public class DeduplicationService : IDeduplicationService
     /// itself stays a grouped index scan.
     /// </para>
     /// </summary>
-    private async Task<Dictionary<Guid, (long Min, long Max)>> LoadGroupExtentsAsync(
+    private static async Task<Dictionary<Guid, (long Min, long Max)>> LoadGroupExtentsAsync(
+        NocturneDbContext db,
         string recordTypeStr,
         List<Guid> canonicalIds,
         CancellationToken ct)
@@ -268,7 +270,7 @@ public class DeduplicationService : IDeduplicationService
         if (canonicalIds.Count == 0)
             return [];
 
-        var rows = await _context.LinkedRecords
+        var rows = await db.LinkedRecords
             .AsNoTracking()
             .Where(lr => lr.RecordType == recordTypeStr && canonicalIds.Contains(lr.CanonicalId))
             .GroupBy(lr => lr.CanonicalId)
@@ -444,6 +446,7 @@ public class DeduplicationService : IDeduplicationService
         IReadOnlyList<DeduplicationInput> records,
         CancellationToken ct)
     {
+        await using var db = await _contexts.CreateAsync(ct);
         if (records.Count == 0)
             return new DeduplicationBatchResult(0, 0, 0, 0);
 
@@ -462,7 +465,7 @@ public class DeduplicationService : IDeduplicationService
         //    below and AddRange'd. AsNoTracking avoids change-tracker snapshots, which for a
         //    wide-window historical backfill batch (thousands of records spanning months) would
         //    otherwise materialize tens of thousands of tracked entities and exhaust memory.
-        var allPotentialMatches = await _context.LinkedRecords
+        var allPotentialMatches = await db.LinkedRecords
             .AsNoTracking()
             .Where(lr => lr.RecordType == recordTypeStr)
             .Where(lr => lr.SourceTimestamp >= minMills && lr.SourceTimestamp <= maxMills)
@@ -471,7 +474,7 @@ public class DeduplicationService : IDeduplicationService
         // 3. One query: the criteria and soft-deleted status behind every candidate link, read by
         //    both the tight matcher below and the wide pass.
         var referencedIds = allPotentialMatches.Select(m => m.RecordId).ToHashSet();
-        var info = await LoadRecordInfoAsync(recordType, referencedIds, ct);
+        var info = await LoadRecordInfoAsync(db, recordType, referencedIds, ct);
 
         bool Matches(Guid recordId, MatchCriteria criteria) =>
             info.TryGetValue(recordId, out var candidate)
@@ -486,6 +489,7 @@ public class DeduplicationService : IDeduplicationService
         if (trackSources)
         {
             groupSources = await LoadGroupSourcesAsync(
+                db,
                 recordTypeStr, allPotentialMatches.Select(m => m.CanonicalId).Distinct().ToList(), ct);
         }
 
@@ -494,7 +498,7 @@ public class DeduplicationService : IDeduplicationService
 
         // 4. One query: which input records are already linked?
         var inputIds = records.Select(r => r.RecordId).ToList();
-        var alreadyLinked = (await _context.LinkedRecords
+        var alreadyLinked = (await db.LinkedRecords
             .Where(lr => lr.RecordType == recordTypeStr && inputIds.Contains(lr.RecordId))
             .Select(lr => lr.RecordId)
             .ToListAsync(ct))
@@ -687,9 +691,9 @@ public class DeduplicationService : IDeduplicationService
         // 6. Bulk insert
         if (newLinks.Count > 0)
         {
-            _context.LinkedRecords.AddRange(newLinks);
-            await _context.SaveChangesAsync(ct);
-            _context.ChangeTracker.Clear();
+            db.LinkedRecords.AddRange(newLinks);
+            await db.SaveChangesAsync(ct);
+            db.ChangeTracker.Clear();
         }
 
         // 7. A wide join reaches up to ten minutes back, so it can land earlier than the group's
@@ -698,7 +702,7 @@ public class DeduplicationService : IDeduplicationService
         //    displays would depend on which connector synced first. Scoped to wide joins: the tight
         //    path's sticky primary is long-standing behaviour.
         if (wideJoinedCanonicals.Count > 0)
-            await RepickPrimariesAsync(recordType, wideJoinedCanonicals.ToArray(), ct);
+            await RepickPrimariesAsync(db, recordType, wideJoinedCanonicals.ToArray(), ct);
 
         return new DeduplicationBatchResult(
             Processed: records.Count,
@@ -708,8 +712,9 @@ public class DeduplicationService : IDeduplicationService
     }
 
     /// <inheritdoc cref="DuplicateGroupPrimaries.RepickAsync"/>
-    private Task RepickPrimariesAsync(RecordType recordType, Guid[] canonicalIds, CancellationToken ct)
-        => DuplicateGroupPrimaries.RepickAsync(_context, recordType, canonicalIds, ct);
+    private static Task RepickPrimariesAsync(
+        NocturneDbContext db, RecordType recordType, Guid[] canonicalIds, CancellationToken ct)
+        => DuplicateGroupPrimaries.RepickAsync(db, recordType, canonicalIds, ct);
 
     /// <summary>
     /// The link a canonical group's <see cref="LinkedRecordEntity.IsPrimary"/> belongs on: the
@@ -760,6 +765,7 @@ public class DeduplicationService : IDeduplicationService
         IReadOnlySet<Guid>? candidateCanonicalIds,
         CancellationToken ct)
     {
+        await using var db = await _contexts.CreateAsync(ct);
         var recordTypeStr = RecordTypeKeys.Key(recordType);
 
         if (candidateCanonicalIds == null)
@@ -767,13 +773,13 @@ public class DeduplicationService : IDeduplicationService
             // Full reconcile: load every primary of this type, ordered by source timestamp.
             // Read-only (union-find input); the rows actually re-pointed are loaded separately
             // and tracked. AsNoTracking keeps this O(all primaries) read off the heap.
-            var allPrimaries = await _context.LinkedRecords
+            var allPrimaries = await db.LinkedRecords
                 .AsNoTracking()
                 .Where(lr => lr.RecordType == recordTypeStr && lr.IsPrimary)
                 .OrderBy(lr => lr.SourceTimestamp)
                 .ToListAsync(ct);
 
-            return await MergePrimariesAsync(recordType, allPrimaries, null, null, null, ct);
+            return await MergePrimariesAsync(db, recordType, allPrimaries, null, null, null, ct);
         }
 
         // Candidate-bounded reconcile: never load all primaries. Load only the candidate
@@ -781,7 +787,7 @@ public class DeduplicationService : IDeduplicationService
         // query to a slice of runs of candidates plus the window either side. This keeps the
         // candidate path bounded by the primaries in the slices around the candidates rather than
         // by all primaries.
-        var candidatePrimaries = await PrimariesOf(recordTypeStr, candidateCanonicalIds).ToListAsync(ct);
+        var candidatePrimaries = await PrimariesOf(db, recordTypeStr, candidateCanonicalIds).ToListAsync(ct);
 
         if (candidatePrimaries.Count == 0)
             return 0;
@@ -816,12 +822,13 @@ public class DeduplicationService : IDeduplicationService
                 var minTs = run[0].SourceTimestamp - neighbourWindowMillis;
                 var maxTs = run[^1].SourceTimestamp + neighbourWindowMillis;
                 loaded ??= await LoadNeighbourPrimariesAsync(
+                    db,
                     recordType, minTs, slice[^1][^1].SourceTimestamp + neighbourWindowMillis, ct);
 
                 var primaries = wideEligible
                     ? loaded
                     : loaded.Where(p => p.SourceTimestamp >= minTs && p.SourceTimestamp <= maxTs).ToList();
-                var runMerged = await MergePrimariesAsync(recordType, primaries, candidateCanonicalIds, minTs, maxTs, ct);
+                var runMerged = await MergePrimariesAsync(db, recordType, primaries, candidateCanonicalIds, minTs, maxTs, ct);
 
                 // A merge re-points links, possibly promoting one inside a later run's range.
                 if (runMerged > 0)
@@ -838,13 +845,14 @@ public class DeduplicationService : IDeduplicationService
     /// a candidate whose neighbour range is <paramref name="minTs"/> to <paramref name="maxTs"/>.
     /// </summary>
     private async Task<List<LinkedRecordEntity>> LoadNeighbourPrimariesAsync(
+        NocturneDbContext db,
         RecordType recordType, long minTs, long maxTs, CancellationToken ct)
     {
         var recordTypeStr = RecordTypeKeys.Key(recordType);
 
         if (!WideMatchableTypes.Contains(recordType))
         {
-            return await _context.LinkedRecords
+            return await db.LinkedRecords
                 .AsNoTracking()
                 .Where(lr => lr.RecordType == recordTypeStr && lr.IsPrimary
                              && lr.SourceTimestamp >= minTs && lr.SourceTimestamp <= maxTs)
@@ -858,7 +866,7 @@ public class DeduplicationService : IDeduplicationService
         // extent comparison. Second, unremarked consequence: the tight pass now sees
         // those same extra primaries, so its reach on this path widens too, which is convergent,
         // since it only lets the tight rules collapse pairs a later pass would have anyway.
-        var neighbourCanonicals = await _context.LinkedRecords
+        var neighbourCanonicals = await db.LinkedRecords
             .AsNoTracking()
             .Where(lr => lr.RecordType == recordTypeStr
                          && lr.SourceTimestamp >= minTs && lr.SourceTimestamp <= maxTs)
@@ -870,7 +878,7 @@ public class DeduplicationService : IDeduplicationService
         // width: everything in the merge (the union-find, the extents, the boundary deferral)
         // is built from this list, so a group dropped for having a distant primary is not
         // deferred, it is invisible, and the pairs it would have made ambiguous merge.
-        return await _context.LinkedRecords
+        return await db.LinkedRecords
             .AsNoTracking()
             .Where(lr => lr.RecordType == recordTypeStr && lr.IsPrimary
                          && neighbourCanonicals.Contains(lr.CanonicalId))
@@ -891,6 +899,7 @@ public class DeduplicationService : IDeduplicationService
     /// </param>
     /// <param name="neighbourMaxTs">The end of that span; null exactly when <paramref name="neighbourMinTs"/> is.</param>
     private async Task<int> MergePrimariesAsync(
+        NocturneDbContext db,
         RecordType recordType,
         List<LinkedRecordEntity> primaries,
         IReadOnlySet<Guid>? candidateCanonicalIds,
@@ -906,7 +915,7 @@ public class DeduplicationService : IDeduplicationService
 
         // 2. Load criteria + deleted status for the primary record ids.
         var primaryIds = primaries.Select(p => p.RecordId).ToHashSet();
-        var info = await LoadRecordInfoAsync(recordType, primaryIds, ct);
+        var info = await LoadRecordInfoAsync(db, recordType, primaryIds, ct);
 
         // 3. Sorted sliding-window union-find over primaries by canonical id.
         var parent = new Dictionary<Guid, Guid>();
@@ -939,6 +948,7 @@ public class DeduplicationService : IDeduplicationService
         if (TracksTightSources(recordType))
         {
             tightRootSources = await LoadGroupSourcesAsync(
+                db,
                 recordTypeStr, primaries.Select(p => p.CanonicalId).Distinct().ToList(), ct);
         }
 
@@ -1008,6 +1018,7 @@ public class DeduplicationService : IDeduplicationService
             // comparison would miss a group whose member — not its primary — sits beside a pair,
             // and would merge a pair the insert path (which scans every link) would refuse.
             var extents = await LoadGroupExtentsAsync(
+                db,
                 recordTypeStr, primaries.Select(p => p.CanonicalId).Distinct().ToList(), ct);
 
             var extentByRoot = new Dictionary<Guid, WideGroupExtent>();
@@ -1086,6 +1097,7 @@ public class DeduplicationService : IDeduplicationService
                     .ToList();
 
                 var sourcesByCanonical = await LoadGroupSourcesAsync(
+                    db,
                     recordTypeStr, partneredPrimaries.Select(p => p.CanonicalId).Distinct().ToList(), ct);
                 var sourcesByRoot = new Dictionary<Guid, HashSet<string>>();
                 var candidateRoots = new HashSet<Guid>();
@@ -1209,7 +1221,7 @@ public class DeduplicationService : IDeduplicationService
                 continue;
 
             // Load every linked row in the merged canonicals (soft-deleted records included).
-            var rows = await _context.LinkedRecords
+            var rows = await db.LinkedRecords
                 .Where(lr => lr.RecordType == recordTypeStr && canonicals.Contains(lr.CanonicalId))
                 .ToListAsync(ct);
             if (rows.Count == 0)
@@ -1217,7 +1229,7 @@ public class DeduplicationService : IDeduplicationService
 
             // Load deleted status for all record ids in the super-group.
             var rowIds = rows.Select(r => r.RecordId).ToHashSet();
-            var rowInfo = await LoadRecordInfoAsync(recordType, rowIds, ct);
+            var rowInfo = await LoadRecordInfoAsync(db, recordType, rowIds, ct);
 
             var survivor = PickSurvivor(rows, rowInfo);
 
@@ -1234,8 +1246,8 @@ public class DeduplicationService : IDeduplicationService
 
         if (merged > 0)
         {
-            await _context.SaveChangesAsync(ct);
-            _context.ChangeTracker.Clear();
+            await db.SaveChangesAsync(ct);
+            db.ChangeTracker.Clear();
         }
 
         return merged;
@@ -1247,6 +1259,7 @@ public class DeduplicationService : IDeduplicationService
         int maxBatches,
         CancellationToken cancellationToken = default)
     {
+        await using var db = await _contexts.CreateAsync(cancellationToken);
         var cursor = await GetCursorAsync(cancellationToken);
         var horizon = DateTime.UtcNow - CommitVisibilityLag;
 
@@ -1255,7 +1268,7 @@ public class DeduplicationService : IDeduplicationService
 
         for (var batchNo = 0; batchNo < maxBatches; batchNo++)
         {
-            var batch = await LinksAfter(cursor, horizon).Take(batchSize).ToListAsync(cancellationToken);
+            var batch = await LinksAfter(db, cursor, horizon).Take(batchSize).ToListAsync(cancellationToken);
 
             if (batch.Count == 0)
             {
@@ -1282,7 +1295,7 @@ public class DeduplicationService : IDeduplicationService
                 {
                     _logger.LogError(ex,
                         "Dedup reconcile for tenant {TenantId} failed merging {RecordType}; the cursor stays at {CursorCreatedAt} {CursorLinkId} and every pass retries this batch until it succeeds",
-                        _context.TenantId, type, cursor?.CreatedAt, cursor?.Id);
+                        db.TenantId, type, cursor?.CreatedAt, cursor?.Id);
                     throw;
                 }
             }
@@ -1309,10 +1322,11 @@ public class DeduplicationService : IDeduplicationService
     /// transaction with the same instant) and the next page continue from there; a cursor on the
     /// timestamp alone would re-read or skip the rest of the run.
     /// </summary>
-    internal IQueryable<LinkedRecordEntity> LinksAfter(ReconcileCursor? after, DateTime horizon)
+    internal static IQueryable<LinkedRecordEntity> LinksAfter(
+        NocturneDbContext db, ReconcileCursor? after, DateTime horizon)
     {
         // Tenant-scoped automatically via the global query filter.
-        var query = _context.LinkedRecords
+        var query = db.LinkedRecords
             .AsNoTracking()
             .Where(lr => lr.SysCreatedAt < horizon);
 
@@ -1334,10 +1348,11 @@ public class DeduplicationService : IDeduplicationService
     /// EF expands an <see cref="IReadOnlySet{T}"/> operand into one parameter per element, so every
     /// set size would get its own statement and plan; an array binds as one parameter.
     /// </summary>
-    internal IQueryable<LinkedRecordEntity> PrimariesOf(string recordTypeStr, IReadOnlySet<Guid> canonicalIds)
+    internal static IQueryable<LinkedRecordEntity> PrimariesOf(
+        NocturneDbContext db, string recordTypeStr, IReadOnlySet<Guid> canonicalIds)
     {
         var ids = canonicalIds.ToArray();
-        return _context.LinkedRecords
+        return db.LinkedRecords
             .AsNoTracking()
             .Where(lr => lr.RecordType == recordTypeStr && lr.IsPrimary && ids.Contains(lr.CanonicalId));
     }
@@ -1351,10 +1366,11 @@ public class DeduplicationService : IDeduplicationService
     /// The global query filter combines tenant scoping (<c>TenantId == this.TenantId</c>) with
     /// the soft-delete predicate (<c>DeletedAt == null</c>) and <c>IgnoreQueryFilters</c> drops
     /// both. To bypass only the soft-delete filter, each query re-applies the tenant predicate
-    /// (<c>e.TenantId == _context.TenantId</c>) explicitly so cross-tenant rows can never leak in.
+    /// (<c>e.TenantId == db.TenantId</c>) explicitly so cross-tenant rows can never leak in.
     /// </para>
     /// </summary>
-    private async Task<Dictionary<Guid, RecordInfo>> LoadRecordInfoAsync(
+    private static async Task<Dictionary<Guid, RecordInfo>> LoadRecordInfoAsync(
+        NocturneDbContext db,
         RecordType recordType, HashSet<Guid> ids, CancellationToken ct)
     {
         if (ids.Count == 0)
@@ -1362,15 +1378,15 @@ public class DeduplicationService : IDeduplicationService
 
         return recordType switch
         {
-            RecordType.SensorGlucose => await LoadAsync<SensorGlucoseEntity>(MatchCriteriaMapper.From, ids, ct),
-            RecordType.Bolus => await LoadAsync<BolusEntity>(MatchCriteriaMapper.From, ids, ct),
-            RecordType.CarbIntake => await LoadAsync<CarbIntakeEntity>(MatchCriteriaMapper.From, ids, ct),
-            RecordType.BGCheck => await LoadAsync<BGCheckEntity>(MatchCriteriaMapper.From, ids, ct),
-            RecordType.DeviceEvent => await LoadAsync<DeviceEventEntity>(MatchCriteriaMapper.From, ids, ct),
-            RecordType.Note => await LoadAsync<NoteEntity>(MatchCriteriaMapper.From, ids, ct),
-            RecordType.BolusCalculation => await LoadAsync<BolusCalculationEntity>(MatchCriteriaMapper.From, ids, ct),
-            RecordType.TempBasal => await LoadAsync<TempBasalEntity>(MatchCriteriaMapper.From, ids, ct),
-            RecordType.StateSpan => await LoadStateSpanInfoAsync(ids, ct),
+            RecordType.SensorGlucose => await LoadAsync<SensorGlucoseEntity>(db, MatchCriteriaMapper.From, ids, ct),
+            RecordType.Bolus => await LoadAsync<BolusEntity>(db, MatchCriteriaMapper.From, ids, ct),
+            RecordType.CarbIntake => await LoadAsync<CarbIntakeEntity>(db, MatchCriteriaMapper.From, ids, ct),
+            RecordType.BGCheck => await LoadAsync<BGCheckEntity>(db, MatchCriteriaMapper.From, ids, ct),
+            RecordType.DeviceEvent => await LoadAsync<DeviceEventEntity>(db, MatchCriteriaMapper.From, ids, ct),
+            RecordType.Note => await LoadAsync<NoteEntity>(db, MatchCriteriaMapper.From, ids, ct),
+            RecordType.BolusCalculation => await LoadAsync<BolusCalculationEntity>(db, MatchCriteriaMapper.From, ids, ct),
+            RecordType.TempBasal => await LoadAsync<TempBasalEntity>(db, MatchCriteriaMapper.From, ids, ct),
+            RecordType.StateSpan => await LoadStateSpanInfoAsync(db, ids, ct),
             _ => new Dictionary<Guid, RecordInfo>()
         };
     }
@@ -1378,12 +1394,13 @@ public class DeduplicationService : IDeduplicationService
     /// <summary>
     /// Loads the criteria and soft-deleted status of every requested row of one entity type.
     /// </summary>
-    private async Task<Dictionary<Guid, RecordInfo>> LoadAsync<TEntity>(
+    private static async Task<Dictionary<Guid, RecordInfo>> LoadAsync<TEntity>(
+        NocturneDbContext db,
         Func<TEntity, MatchCriteria> toCriteria, HashSet<Guid> ids, CancellationToken ct)
         where TEntity : class, IV4Entity
     {
-        var records = await _context.Set<TEntity>().AsNoTracking().IgnoreQueryFilters()
-            .Where(e => e.TenantId == _context.TenantId && ids.Contains(e.Id)).ToListAsync(ct);
+        var records = await db.Set<TEntity>().AsNoTracking().IgnoreQueryFilters()
+            .Where(e => e.TenantId == db.TenantId && ids.Contains(e.Id)).ToListAsync(ct);
         return records.ToDictionary(e => e.Id, e => new RecordInfo(toCriteria(e), e.DeletedAt != null));
     }
 
@@ -1392,11 +1409,12 @@ public class DeduplicationService : IDeduplicationService
     /// <see cref="StateSpanEntity"/> is keyed by <c>OriginalId</c> rather than the
     /// <c>LegacyId</c> that <see cref="IV4Entity"/> requires.
     /// </summary>
-    private async Task<Dictionary<Guid, RecordInfo>> LoadStateSpanInfoAsync(
+    private static async Task<Dictionary<Guid, RecordInfo>> LoadStateSpanInfoAsync(
+        NocturneDbContext db,
         HashSet<Guid> ids, CancellationToken ct)
     {
-        var records = await _context.StateSpans.AsNoTracking().IgnoreQueryFilters()
-            .Where(s => s.TenantId == _context.TenantId && ids.Contains(s.Id)).ToListAsync(ct);
+        var records = await db.StateSpans.AsNoTracking().IgnoreQueryFilters()
+            .Where(s => s.TenantId == db.TenantId && ids.Contains(s.Id)).ToListAsync(ct);
         return records.ToDictionary(s => s.Id,
             s => new RecordInfo(MatchCriteriaMapper.From(s), s.DeletedAt != null));
     }
@@ -1405,9 +1423,9 @@ public class DeduplicationService : IDeduplicationService
     /// Internal test seam over <see cref="LoadRecordInfoAsync"/>. Exposed to the
     /// test assembly via <c>InternalsVisibleTo</c>; not part of the public API.
     /// </summary>
-    internal Task<Dictionary<Guid, RecordInfo>> LoadRecordInfoForTestAsync(
-        RecordType recordType, HashSet<Guid> ids, CancellationToken ct = default)
-        => LoadRecordInfoAsync(recordType, ids, ct);
+    internal static Task<Dictionary<Guid, RecordInfo>> LoadRecordInfoForTestAsync(
+        NocturneDbContext db, RecordType recordType, HashSet<Guid> ids, CancellationToken ct = default)
+        => LoadRecordInfoAsync(db, recordType, ids, ct);
 
     private static int LowerBoundTimestamp(long[] sortedTimestamps, long value)
     {
@@ -1503,7 +1521,8 @@ public class DeduplicationService : IDeduplicationService
         Guid canonicalId,
         CancellationToken cancellationToken = default)
     {
-        var entities = await _context.LinkedRecords
+        await using var db = await _contexts.CreateAsync(cancellationToken);
+        var entities = await db.LinkedRecords
             .Where(lr => lr.CanonicalId == canonicalId)
             .OrderBy(static lr => lr.SourceTimestamp)
             .ToListAsync(cancellationToken);
@@ -1547,9 +1566,10 @@ public class DeduplicationService : IDeduplicationService
         Guid recordId,
         CancellationToken cancellationToken = default)
     {
+        await using var db = await _contexts.CreateAsync(cancellationToken);
         var recordTypeStr = RecordTypeKeys.Key(recordType);
 
-        var entity = await _context.LinkedRecords
+        var entity = await db.LinkedRecords
             .FirstOrDefaultAsync(lr =>
                 lr.RecordType == recordTypeStr && lr.RecordId == recordId,
                 cancellationToken);
@@ -1575,8 +1595,9 @@ public class DeduplicationService : IDeduplicationService
         Guid canonicalId,
         CancellationToken cancellationToken = default)
     {
+        await using var db = await _contexts.CreateAsync(cancellationToken);
         var key = RecordTypeKeys.Key(RecordType.StateSpan);
-        var linkedRecords = await _context.LinkedRecords
+        var linkedRecords = await db.LinkedRecords
             .Where(lr => lr.CanonicalId == canonicalId && lr.RecordType == key)
             .OrderBy(static lr => lr.SourceTimestamp)
             .ToListAsync(cancellationToken);
@@ -1585,7 +1606,7 @@ public class DeduplicationService : IDeduplicationService
             return null;
 
         var recordIds = linkedRecords.Select(lr => lr.RecordId).ToList();
-        var stateSpans = await _context.StateSpans
+        var stateSpans = await db.StateSpans
             .Where(s => recordIds.Contains(s.Id))
             .ToListAsync(cancellationToken);
 
@@ -1603,6 +1624,7 @@ public class DeduplicationService : IDeduplicationService
 
     private delegate Task<(int processed, int groups, int linked, int duplicates)> PhaseRunner(
         DeduplicationService service,
+        NocturneDbContext db,
         int totalRecords,
         int startOffset,
         IProgress<DeduplicationProgress>? progress,
@@ -1655,9 +1677,9 @@ public class DeduplicationService : IDeduplicationService
                 return context.LinkedRecords
                     .Where(lr => lr.RecordType == key && !recordIds.Any(recordId => recordId == lr.RecordId));
             },
-            (service, totalRecords, startOffset, progress, ct) => service.DeduplicateTypeAsync(
+            (service, db, totalRecords, startOffset, progress, ct) => service.DeduplicateTypeAsync(
                 recordType,
-                set(service._context),
+                set(db),
                 timestamp,
                 e => new DeduplicationInput(
                     recordId(e),
@@ -1745,6 +1767,7 @@ public class DeduplicationService : IDeduplicationService
         IProgress<DeduplicationProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        await using var db = await _contexts.CreateAsync(cancellationToken);
         var stopwatch = Stopwatch.StartNew();
 
         try
@@ -1752,7 +1775,7 @@ public class DeduplicationService : IDeduplicationService
             var totalRecords = 0;
             foreach (var phase in TypePhases)
             {
-                totalRecords += await phase.CountAsync(_context, cancellationToken);
+                totalRecords += await phase.CountAsync(db, cancellationToken);
             }
 
             var processed = 0;
@@ -1763,7 +1786,7 @@ public class DeduplicationService : IDeduplicationService
 
             foreach (var phase in TypePhases)
             {
-                var result = await phase.RunAsync(this, totalRecords, processed, progress, cancellationToken);
+                var result = await phase.RunAsync(this, db, totalRecords, processed, progress, cancellationToken);
                 processedByType[phase.RecordType] = result.processed;
                 processed += result.processed;
                 groupsCreated += result.groups;
@@ -2101,8 +2124,9 @@ public class DeduplicationService : IDeduplicationService
     /// </summary>
     internal async Task<ReconcileCursor?> GetCursorAsync(CancellationToken ct)
     {
-        var state = await _context.DedupReconcileState
-            .Where(s => s.TenantId == _context.TenantId)
+        await using var db = await _contexts.CreateAsync(ct);
+        var state = await db.DedupReconcileState
+            .Where(s => s.TenantId == db.TenantId)
             .FirstOrDefaultAsync(ct);
 
         return state is null
@@ -2116,6 +2140,7 @@ public class DeduplicationService : IDeduplicationService
     /// </summary>
     internal async Task SetCursorAsync(ReconcileCursor cursor, CancellationToken ct)
     {
+        await using var db = await _contexts.CreateAsync(ct);
         // Npgsql requires Kind=Utc to persist a timestamptz; SQLite tests won't catch a bad caller.
         var createdAt = cursor.CreatedAt.Kind switch
         {
@@ -2124,21 +2149,21 @@ public class DeduplicationService : IDeduplicationService
             _ => DateTime.SpecifyKind(cursor.CreatedAt, DateTimeKind.Utc)
         };
 
-        var state = await _context.DedupReconcileState
-            .Where(s => s.TenantId == _context.TenantId)
+        var state = await db.DedupReconcileState
+            .Where(s => s.TenantId == db.TenantId)
             .FirstOrDefaultAsync(ct);
 
         if (state is null)
         {
             // single-threaded per tenant; PK guards accidental concurrent insert
-            state = new DedupReconcileStateEntity { TenantId = _context.TenantId };
-            _context.DedupReconcileState.Add(state);
+            state = new DedupReconcileStateEntity { TenantId = db.TenantId };
+            db.DedupReconcileState.Add(state);
         }
 
         state.LastReconciledLinkCreatedAt = createdAt;
         state.LastReconciledLinkId = cursor.Id;
 
-        await _context.SaveChangesAsync(ct);
+        await db.SaveChangesAsync(ct);
     }
 }
 

@@ -123,7 +123,7 @@ public class TrackersController : ControllerBase, IWriteScopedController
             startedAt,
             completionNotes: null,
             completeTreatmentId: null,
-            ct => _repository.StartInstanceAsync(
+            (tx, ct) => tx.StartInstanceAsync(
                 definition.Id,
                 userId,
                 startNotes,
