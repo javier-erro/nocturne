@@ -31,7 +31,11 @@ public class ReadAccessAuditFilterTests
     private readonly ILogger<ReadAccessAuditFilter> _logger = NullLogger<ReadAccessAuditFilter>.Instance;
 
     private ReadAccessAuditFilter CreateFilter() =>
-        new(_configCache.Object, _auditContext.Object, _contextFactory.Object.AsNocturneFactory(), _logger);
+        new(
+            _configCache.Object,
+            _auditContext.Object,
+            new ReadAccessLogWriter(_contextFactory.Object.AsNocturneFactory(), NullLogger<ReadAccessLogWriter>.Instance),
+            _logger);
 
     private static (ResultExecutingContext executingContext, ResultExecutionDelegate next) CreateContexts(
         string path,

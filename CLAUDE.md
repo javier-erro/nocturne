@@ -276,7 +276,9 @@ reason.
 The factory is transient. Resolved from the root (singletons, hosted services, middleware
 constructors) it has no scope, and its contexts read fail-closed defaults: empty tenant,
 not a share, null CSV, no clamp, no audit actor. A root-resolved factory never reads a
-request's state, and nothing reads `HttpContext` for it. The raw
+request's state, and nothing reads `HttpContext` for it. A write that outlives its request
+(fire-and-forget) uses a root-resolved factory and pins the tenant from a captured value,
+never the request's factory: that one reads the request's scope after it is disposed. The raw
 `IDbContextFactory<NocturneDbContext>` stays registered for Infrastructure's own use only.
 
 Background work opens its scope with `TenantJobScope.Open(provider, tenant, actor)`

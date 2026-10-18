@@ -298,7 +298,6 @@ public class MemberScopeFilterPipelineTests
 
         var services = new ServiceCollection();
         services.AddScoped(_ => db.CreateContext());
-        services.AddSingleton(db.ContextFactory.AsNocturneFactory());
         using var provider = services.BuildServiceProvider();
 
         var httpContext = new DefaultHttpContext { RequestServices = provider };
@@ -315,7 +314,7 @@ public class MemberScopeFilterPipelineTests
         httpContext.Items["PermissionTrie"] = new PermissionTrie();
 
         var middleware = new MemberScopeMiddleware(
-            _ => Task.CompletedTask, NullLogger<MemberScopeMiddleware>.Instance);
+            _ => Task.CompletedTask, db.ContextFactory.AsNocturneFactory(), NullLogger<MemberScopeMiddleware>.Instance);
         await middleware.InvokeAsync(httpContext);
 
         return (IReadOnlySet<string>)httpContext.Items["GrantedScopes"]!;

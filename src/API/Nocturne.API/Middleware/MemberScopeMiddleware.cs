@@ -38,16 +38,25 @@ namespace Nocturne.API.Middleware;
 public class MemberScopeMiddleware
 {
     private readonly RequestDelegate _next;
+    private readonly INocturneDbContextFactory _detachedContexts;
     private readonly ILogger<MemberScopeMiddleware> _logger;
 
     /// <summary>
     /// Creates a new instance of <see cref="MemberScopeMiddleware"/>.
     /// </summary>
     /// <param name="next">The next middleware in the pipeline.</param>
+    /// <param name="detachedContexts">
+    /// Resolved from the root with the middleware, so its contexts read no request's state; used for
+    /// the last-used write that outlives the request.
+    /// </param>
     /// <param name="logger">Logger for membership resolution diagnostics.</param>
-    public MemberScopeMiddleware(RequestDelegate next, ILogger<MemberScopeMiddleware> logger)
+    public MemberScopeMiddleware(
+        RequestDelegate next,
+        INocturneDbContextFactory detachedContexts,
+        ILogger<MemberScopeMiddleware> logger)
     {
         _next = next;
+        _detachedContexts = detachedContexts;
         _logger = logger;
     }
 
@@ -190,15 +199,15 @@ public class MemberScopeMiddleware
             var membershipId = membership.Id;
             var ip = context.Connection.RemoteIpAddress?.ToString();
             var userAgent = context.Request.Headers.UserAgent.FirstOrDefault();
-            var dbFactory = context.RequestServices.GetRequiredService<INocturneDbContextFactory>();
 
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    // Outlives the request, so it holds the factory rather than the request's
-                    // services. The update is keyed on the tenant as well as the membership id.
-                    await using var db = await dbFactory.CreateForTenantAsync(tenantId);
+                    // Outlives the request, so it reads nothing of the request's scope: the factory is
+                    // the root one and the tenant is pinned from a captured value. The update is keyed
+                    // on the tenant as well as the membership id.
+                    await using var db = await _detachedContexts.CreateForTenantAsync(tenantId);
                     await db.TenantMembers
                         .Where(tm => tm.Id == membershipId && tm.TenantId == tenantId)
                         .ExecuteUpdateAsync(s => s

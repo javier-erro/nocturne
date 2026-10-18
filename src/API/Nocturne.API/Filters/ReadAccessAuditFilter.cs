@@ -6,7 +6,6 @@ using Nocturne.API.Extensions;
 using Nocturne.Core.Contracts.Audit;
 using Nocturne.Core.Contracts.Multitenancy;
 using Nocturne.Core.Models.V4;
-using Nocturne.Infrastructure.Data.Services;
 using Nocturne.Infrastructure.Data.Entities;
 
 namespace Nocturne.API.Filters;
@@ -24,18 +23,18 @@ public class ReadAccessAuditFilter : IAsyncResultFilter, IAsyncExceptionFilter
 
     private readonly ITenantAuditConfigCache _configCache;
     private readonly IAuditContext _auditContext;
-    private readonly INocturneDbContextFactory _contextFactory;
+    private readonly ReadAccessLogWriter _writer;
     private readonly ILogger<ReadAccessAuditFilter> _logger;
 
     public ReadAccessAuditFilter(
         ITenantAuditConfigCache configCache,
         IAuditContext auditContext,
-        INocturneDbContextFactory contextFactory,
+        ReadAccessLogWriter writer,
         ILogger<ReadAccessAuditFilter> logger)
     {
         _configCache = configCache;
         _auditContext = auditContext;
-        _contextFactory = contextFactory;
+        _writer = writer;
         _logger = logger;
     }
 
@@ -115,8 +114,7 @@ public class ReadAccessAuditFilter : IAsyncResultFilter, IAsyncExceptionFilter
                 CreatedAt = DateTime.UtcNow,
             };
 
-            // Fire-and-forget — non-blocking DB write
-            _ = WriteAuditLogAsync(entry, tenantContext.TenantId);
+            _writer.Enqueue(entry);
         }
         catch (Exception ex)
         {
@@ -179,19 +177,5 @@ public class ReadAccessAuditFilter : IAsyncResultFilter, IAsyncExceptionFilter
         }
 
         return JsonSerializer.Serialize(sanitized);
-    }
-
-    private async Task WriteAuditLogAsync(ReadAccessLogEntity entry, Guid tenantId)
-    {
-        try
-        {
-            await using var ctx = await _contextFactory.CreateForTenantAsync(tenantId);
-            ctx.ReadAccessLog.Add(entry);
-            await ctx.SaveChangesAsync();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to write read access audit log entry for {Endpoint}", entry.Endpoint);
-        }
     }
 }
