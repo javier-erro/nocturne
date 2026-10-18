@@ -1,11 +1,14 @@
+using System.Data.Common;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Reflection;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
+using Nocturne.API.Authorization;
 using Nocturne.API.Extensions;
 using Nocturne.API.Services.Auth;
+using Nocturne.API.Services.Glucose;
 using Nocturne.Core.Constants;
 using Nocturne.Core.Contracts.Platform;
 using Nocturne.Core.Contracts.Multitenancy;
@@ -13,6 +16,7 @@ using Nocturne.Core.Models;
 using Nocturne.Core.Models.Configuration;
 using Nocturne.Infrastructure.Cache.Abstractions;
 using Nocturne.Infrastructure.Data;
+using Nocturne.Infrastructure.Data.Services;
 
 namespace Nocturne.API.Services.Platform;
 
@@ -32,19 +36,39 @@ public class StatusService : IStatusService
     /// <summary>Process start time, captured once, used to report real server uptime.</summary>
     private static readonly DateTime ProcessStartUtc = Process.GetCurrentProcess().StartTime.ToUniversalTime();
 
+    private static string? _postgresVersion;
+
     private readonly IConfiguration _configuration;
     private readonly ICacheService _cacheService;
     private readonly IDemoModeService _demoModeService;
     private readonly NocturneDbContext _dbContext;
     private readonly IDbContextFactory<NocturneDbContext> _dbContextFactory;
+    private readonly ITenantDbContextFactory _tenantDbContextFactory;
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly ITenantAccessor _tenantAccessor;
     private readonly PublicAccessCacheService _publicAccessCacheService;
     private readonly ITenantService _tenants;
+    private readonly IShareAppearanceReader _appearanceReader;
+    private readonly IGlucoseStatusClassifier _thresholdClassifier;
+    private readonly ICategoryReadContext _categoryReadContext;
     private readonly ILogger<StatusService> _logger;
 
-    /// <summary>The cache key of a tenant's system status, before its demo-mode suffix.</summary>
+    /// <summary>The cache key of a tenant's system status, before its demo-mode and rules suffixes.</summary>
     public static string SystemStatusCacheKey(string tenantId) => $"status:system:{tenantId}";
+
+    /// <summary>
+    /// Whether the caller may see thresholds derived from the tenant's alert rules. A share cannot
+    /// read <c>alert_rules</c> and an anonymous caller is held to the same view, so both resolve
+    /// the configured defaults. Also the cache's one caller-dependent dimension.
+    /// </summary>
+    private bool ReadsAlertRules =>
+        !_categoryReadContext.IsShare && _httpContextAccessor.HttpContext?.IsAuthenticated() == true;
+
+    /// <summary>
+    /// Set when the thresholds fell back to the defaults because <c>alert_rules</c> could not be
+    /// read, so the response is returned but not cached and the next request tries again.
+    /// </summary>
+    private bool _thresholdsDegraded;
 
     private string TenantCacheId => _tenantAccessor.Context?.TenantId.ToString()
         ?? throw new InvalidOperationException("Tenant context is not resolved");
@@ -55,10 +79,14 @@ public class StatusService : IStatusService
         IDemoModeService demoModeService,
         NocturneDbContext dbContext,
         IDbContextFactory<NocturneDbContext> dbContextFactory,
+        ITenantDbContextFactory tenantDbContextFactory,
         IHttpContextAccessor httpContextAccessor,
         ITenantAccessor tenantAccessor,
         PublicAccessCacheService publicAccessCacheService,
         ITenantService tenants,
+        IShareAppearanceReader appearanceReader,
+        IGlucoseStatusClassifier thresholdClassifier,
+        ICategoryReadContext categoryReadContext,
         ILogger<StatusService> logger
     )
     {
@@ -67,10 +95,14 @@ public class StatusService : IStatusService
         _demoModeService = demoModeService;
         _dbContext = dbContext;
         _dbContextFactory = dbContextFactory;
+        _tenantDbContextFactory = tenantDbContextFactory;
         _httpContextAccessor = httpContextAccessor;
         _tenantAccessor = tenantAccessor;
         _publicAccessCacheService = publicAccessCacheService;
         _tenants = tenants;
+        _appearanceReader = appearanceReader;
+        _thresholdClassifier = thresholdClassifier;
+        _categoryReadContext = categoryReadContext;
         _logger = logger;
     }
 
@@ -85,7 +117,7 @@ public class StatusService : IStatusService
             {
                 Status = "setup_required",
                 Name = "Nocturne",
-                Version = GetVersionString(),
+                Version = AppVersion.Current,
                 ServerTime = DateTime.UtcNow,
                 ApiEnabled = false,
             };
@@ -93,7 +125,8 @@ public class StatusService : IStatusService
 
         // Include demo mode in cache key to ensure correct status is returned
         var demoSuffix = _demoModeService.IsEnabled ? ":demo" : "";
-        var cacheKey = SystemStatusCacheKey(TenantCacheId) + demoSuffix;
+        var rulesSuffix = ReadsAlertRules ? "" : ":defaults";
+        var cacheKey = SystemStatusCacheKey(TenantCacheId) + demoSuffix + rulesSuffix;
         var cacheTtl = TimeSpan.FromMinutes(2);
 
         var cachedStatus = await _cacheService.GetAsync<StatusResponse>(cacheKey);
@@ -110,10 +143,16 @@ public class StatusService : IStatusService
             "Cache MISS for system status (demoMode: {DemoMode}), generating response",
             _demoModeService.IsEnabled
         );
+        _thresholdsDegraded = false;
         var status = await GenerateSystemStatusAsync();
 
         if (status != null)
         {
+            if (_thresholdsDegraded)
+            {
+                return status;
+            }
+
             await _cacheService.SetAsync(cacheKey, status, cacheTtl);
             _logger.LogDebug("Cached system status with {TTL}min TTL", cacheTtl.TotalMinutes);
             return status;
@@ -124,7 +163,7 @@ public class StatusService : IStatusService
         {
             Status = "error",
             Name = "Nocturne",
-            Version = "unknown",
+            Version = AppVersion.Current,
             ServerTime = DateTime.UtcNow,
             ApiEnabled = true,
         };
@@ -137,7 +176,7 @@ public class StatusService : IStatusService
     {
         _logger.LogDebug("Generating system status response");
 
-        var version = GetVersionString();
+        var version = AppVersion.Current;
         var serverTime = DateTime.UtcNow;
         var settings = await GetPublicSettingsAsync();
 
@@ -237,16 +276,6 @@ public class StatusService : IStatusService
     /// </summary>
     private static bool GrantsReadAccess(IEnumerable<string> permissions)
         => permissions.Any(p => ReadPermissions.Contains(p));
-
-    /// <summary>
-    /// Get the application version string
-    /// </summary>
-    private static string GetVersionString()
-    {
-        var assembly = Assembly.GetExecutingAssembly();
-        var version = assembly.GetName().Version;
-        return version?.ToString() ?? "1.0.0";
-    }
 
     /// <summary>
     /// Get the build timestamp stamped into the image at build time, or null if unstamped
@@ -400,14 +429,14 @@ public class StatusService : IStatusService
     {
         var settings = new Dictionary<string, object>();
 
-        // Core display settings. Units are the tenant default chosen in onboarding, which is what a
-        // Nightscout client reads as DISPLAY_UNITS.
-        var tenantUnits = _tenantAccessor.Context is { } tenant
-            ? await _tenants.GetDefaultGlucoseUnitsAsync(tenant.TenantId)
-            : null;
-        settings["units"] = tenantUnits
-            ?? _configuration[ServiceNames.ConfigKeys.DisplayUnits]
-            ?? GlucoseUnitDefaults.MgDl;
+        // Core display settings. Units are the owner's own choice, else the tenant default chosen in
+        // onboarding, which is what a Nightscout client reads as DISPLAY_UNITS.
+        var appearance = await _appearanceReader.GetSharedAppearanceAsync(_tenantAccessor.TenantId);
+        var tenantUnits = appearance.GlucoseUnits
+            ?? (_tenantAccessor.Context is { } tenant
+                ? await _tenants.GetDefaultGlucoseUnitsAsync(tenant.TenantId)
+                : null);
+        settings["units"] = tenantUnits ?? GlucoseUnitDefaults.MgDl;
         settings["timeFormat"] = _configuration.GetValue<int>("Display:TimeFormat", 12);
         settings["dayStart"] = _configuration.GetValue<int>("Display:DayStart", 7);
         settings["dayEnd"] = _configuration.GetValue<int>("Display:DayEnd", 21);
@@ -454,13 +483,13 @@ public class StatusService : IStatusService
         // required for tenant data unconditionally rather than by setting.
         settings["requireAuthentication"] = false;
 
-        // Threshold values
+        var thresholds = await ResolveThresholdsAsync();
         settings["thresholds"] = new Dictionary<string, object>
         {
-            ["bgHigh"] = _configuration.GetValue("Thresholds:BgHigh", ApplicationConstants.Web.Thresholds.BgHigh),
-            ["bgTargetTop"] = _configuration.GetValue("Thresholds:BgTargetTop", ApplicationConstants.Web.Thresholds.BgTargetTop),
-            ["bgTargetBottom"] = _configuration.GetValue("Thresholds:BgTargetBottom", ApplicationConstants.Web.Thresholds.BgTargetBottom),
-            ["bgLow"] = _configuration.GetValue("Thresholds:BgLow", ApplicationConstants.Web.Thresholds.BgLow),
+            ["bgHigh"] = thresholds.UrgentHigh,
+            ["bgTargetTop"] = thresholds.High,
+            ["bgTargetBottom"] = thresholds.Low,
+            ["bgLow"] = thresholds.UrgentLow,
         };
 
         // Security settings
@@ -490,9 +519,37 @@ public class StatusService : IStatusService
         settings["alarmTypes"] = _configuration.GetSection("Alarms:Types").Get<string[]>() ?? new[] { "predict" };
         settings["enable"] = GetEnabledFeaturesArray();
 
-        await Task.CompletedTask; // For future async operations
-
         return settings;
+    }
+
+    /// <summary>
+    /// Resolves the thresholds in mg/dL. An unreadable <c>alert_rules</c> degrades to the configured
+    /// defaults so the status endpoint keeps answering.
+    /// </summary>
+    private async Task<TenantOverviewThresholds> ResolveThresholdsAsync()
+    {
+        if (!ReadsAlertRules)
+        {
+            return _thresholdClassifier.Defaults;
+        }
+
+        var ct = _httpContextAccessor.HttpContext?.RequestAborted ?? CancellationToken.None;
+        try
+        {
+            await using var db = await _tenantDbContextFactory.CreateAsync(ct);
+            return await _thresholdClassifier.ResolveThresholdsAsync(db, ct);
+        }
+        catch (DbException ex)
+        {
+            _logger.LogWarning(ex, "Failed to read alert rules for status thresholds; using the defaults");
+        }
+        catch (RetryLimitExceededException ex)
+        {
+            _logger.LogWarning(ex, "Failed to read alert rules for status thresholds; using the defaults");
+        }
+
+        _thresholdsDegraded = true;
+        return _thresholdClassifier.Defaults;
     }
 
     /// <summary>
@@ -568,6 +625,7 @@ public class StatusService : IStatusService
         var basicStatus = await GetSystemStatusAsync();
 
         var storageVersion = await GetPostgresVersionAsync();
+        var serverTime = DateTime.UtcNow;
 
         var response = new V3StatusResponse
         {
@@ -577,12 +635,12 @@ public class StatusService : IStatusService
                 Version = storageVersion,
             },
             ApiPermissions = GetV3ApiPermissions(),
-            ApiVersion = basicStatus.Head ?? "unknown",
+            ApiVersion = ApplicationConstants.NightscoutApi.V3Version,
             Status = basicStatus.Status,
             Name = basicStatus.Name ?? "Nocturne",
-            Version = basicStatus.Version ?? "unknown",
-            ServerTime = basicStatus.ServerTime,
-            SrvDate = new DateTimeOffset(basicStatus.ServerTime).ToUnixTimeMilliseconds(),
+            Version = basicStatus.Version ?? AppVersion.Current,
+            ServerTime = serverTime,
+            SrvDate = new DateTimeOffset(serverTime).ToUnixTimeMilliseconds(),
             ApiEnabled = basicStatus.ApiEnabled,
             CareportalEnabled = basicStatus.CareportalEnabled ?? false,
             Head = basicStatus.Head ?? "unknown",
@@ -608,16 +666,28 @@ public class StatusService : IStatusService
     /// <remarks>
     /// Deleted rows count, as Nightscout counts its <c>isValid: false</c> documents: a delete moves
     /// the stamp, and a client only reads the history once the collection's stamp has moved.
+    /// <para>
+    /// A collection the caller holds no read scope for (<see cref="LegacyStorageReadScopes"/>) is
+    /// left null. The stamps are read through <see cref="ITenantDbContextFactory"/>, so share RLS and
+    /// the history clamp narrow each table as they narrow every other read: a share or a clamped
+    /// member learns nothing of a row it cannot read, not even when it changed.
+    /// </para>
     /// </remarks>
     public async Task<LastModifiedResponse> GetLastModifiedAsync()
     {
         _logger.LogDebug("Generating last modified timestamps response");
 
         var serverTime = DateTime.UtcNow;
+        var grantedScopes = _httpContextAccessor.HttpContext?.GetGrantedScopes() ?? new HashSet<string>();
+
+        Task<DateTime?> ReadableLastModifiedAsync(string collection, Func<NocturneDbContext, Task<DateTime?>> query) =>
+            LegacyStorageReadScopes.CanRead(grantedScopes, collection)
+                ? LastModifiedAsync(query)
+                : Task.FromResult<DateTime?>(null);
 
         // Each query gets its own short-lived DbContext via the factory so they can
         // run concurrently — a single DbContext is not thread-safe.
-        var entriesTask = LastModifiedAsync(async ctx =>
+        var entriesTask = ReadableLastModifiedAsync("entries", async ctx =>
         {
             var timestamps = new[]
             {
@@ -628,7 +698,7 @@ public class StatusService : IStatusService
             return timestamps.Where(d => d.HasValue).Max();
         });
 
-        var treatmentsTask = LastModifiedAsync(async ctx =>
+        var treatmentsTask = ReadableLastModifiedAsync("treatments", async ctx =>
         {
             var timestamps = new[]
             {
@@ -643,7 +713,7 @@ public class StatusService : IStatusService
             return timestamps.Where(d => d.HasValue).Max();
         });
 
-        var profileTask = LastModifiedAsync(async ctx =>
+        var profileTask = ReadableLastModifiedAsync("profile", async ctx =>
         {
             var timestamps = new[]
             {
@@ -656,17 +726,17 @@ public class StatusService : IStatusService
             return timestamps.Where(d => d.HasValue).Max();
         });
 
-        var deviceStatusTask = LastModifiedAsync(ctx => ctx.ApsSnapshots.IncludingDeleted().AsNoTracking()
+        var deviceStatusTask = ReadableLastModifiedAsync("devicestatus", ctx => ctx.ApsSnapshots.IncludingDeleted().AsNoTracking()
             .OrderByDescending(d => d.SysUpdatedAt)
             .Select(d => (DateTime?)d.SysUpdatedAt)
             .FirstOrDefaultAsync());
 
-        var foodTask = LastModifiedAsync(ctx => ctx.Foods.IncludingDeleted().AsNoTracking()
+        var foodTask = ReadableLastModifiedAsync("food", ctx => ctx.Foods.IncludingDeleted().AsNoTracking()
             .OrderByDescending(f => f.SysUpdatedAt)
             .Select(f => (DateTime?)f.SysUpdatedAt)
             .FirstOrDefaultAsync());
 
-        var settingsTask = LastModifiedAsync(ctx => ctx.Settings.AsNoTracking()
+        var settingsTask = ReadableLastModifiedAsync("settings", ctx => ctx.Settings.AsNoTracking()
             .OrderByDescending(s => s.SrvModified ?? s.SysUpdatedAt)
             .Select(s =>
                 (DateTime?)(s.SrvModified.HasValue ? s.SrvModified.Value.UtcDateTime : s.SysUpdatedAt))
@@ -763,18 +833,20 @@ public class StatusService : IStatusService
     }
 
     /// <summary>
-    /// Get the PostgreSQL server version string (cached with basic status)
+    /// Get the PostgreSQL server version string, read once per process
     /// </summary>
     private async Task<string> GetPostgresVersionAsync()
     {
+        if (_postgresVersion is { } cached)
+            return cached;
+
         try
         {
             await using var ctx = await _dbContextFactory.CreateDbContextAsync();
-            var version = await ctx.Database.ExecuteSqlRawAsync("SELECT 1");
             var conn = ctx.Database.GetDbConnection();
             if (conn.State != System.Data.ConnectionState.Open)
                 await conn.OpenAsync();
-            return conn.ServerVersion;
+            return _postgresVersion = conn.ServerVersion;
         }
         catch (Exception ex)
         {
@@ -787,24 +859,26 @@ public class StatusService : IStatusService
     /// Get per-collection CRUD permission strings matching legacy Nightscout apiPermissions format.
     /// </summary>
     /// <remarks>
-    /// Deliberately caller-independent. AAPS reduces this map to a single boolean — every one of the
-    /// six collections must read "crud" or <c>hasWritePermission</c> is false and its uploader stops
-    /// syncing entirely — so a token scoped to the categories AAPS actually uses would be answered
-    /// with a narrower map and lose upload, not just delete. The per-action
-    /// <see cref="Attributes.RequireScopeAttribute"/> remains the enforcement point; this map
-    /// advertises the collections the API serves, not one credential's grant.
+    /// Deliberately independent of an authenticated caller's grant. AAPS reduces this map to a single
+    /// boolean: every one of the six collections must read "crud" or <c>hasWritePermission</c> is
+    /// false and its uploader stops syncing entirely. So a token scoped to the categories AAPS
+    /// actually uses would be answered with a narrower map and lose upload, not just delete. The
+    /// per-action <see cref="Attributes.RequireScopeAttribute"/> remains the enforcement point; this
+    /// map advertises the collections the API serves, not one credential's grant. A public share can
+    /// never write, so it is told "r" for the collections it can read and nothing else.
     /// </remarks>
-    private static Dictionary<string, string> GetV3ApiPermissions()
+    private Dictionary<string, string> GetV3ApiPermissions()
     {
-        return new Dictionary<string, string>
+        var httpContext = _httpContextAccessor.HttpContext;
+        if (httpContext?.IsAuthenticated() == true)
         {
-            ["devicestatus"] = "crud",
-            ["entries"] = "crud",
-            ["food"] = "crud",
-            ["profile"] = "crud",
-            ["settings"] = "crud",
-            ["treatments"] = "crud",
-        };
+            return LegacyStorageReadScopes.Collections.ToDictionary(collection => collection, _ => "crud");
+        }
+
+        var grantedScopes = httpContext?.GetGrantedScopes() ?? new HashSet<string>();
+        return LegacyStorageReadScopes.Collections
+            .Where(collection => LegacyStorageReadScopes.CanRead(grantedScopes, collection))
+            .ToDictionary(collection => collection, _ => "r");
     }
 
     /// <summary>
@@ -855,19 +929,14 @@ public class StatusService : IStatusService
         return new Dictionary<string, bool>
         {
             ["v1"] = true,
-            ["v2"] = false, // Not implemented yet
-            ["v3"] = true, // Partially implemented
+            ["v2"] = true,
+            ["v3"] = true,
         };
     }
 
     private async Task<DateTime?> LastModifiedAsync(Func<NocturneDbContext, Task<DateTime?>> query)
     {
-        await using var ctx = await _dbContextFactory.CreateDbContextAsync();
-        // Pooled contexts do not reset TenantId, so a context leased from the factory carries
-        // the previous lessee's tenant. Pin the resolved tenant before querying so the
-        // tenant-scoped collections (entries/treatments/profile/devicestatus/food/settings) and
-        // RLS scope to this tenant rather than leaking another tenant's last-modified timestamps.
-        ctx.TenantId = _tenantAccessor.Context?.TenantId ?? Guid.Empty;
+        await using var ctx = await _tenantDbContextFactory.CreateAsync();
         return await query(ctx);
     }
 
