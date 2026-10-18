@@ -134,7 +134,7 @@ public class StatisticsController : ControllerBase
     /// same <see cref="Task.WhenAll(Task[])"/> so a failure here still observes them.
     /// </remarks>
     private async Task<InsulinRecords> FetchInsulinRecordsAsync(
-        DateTime from, DateTime to, CancellationToken ct = default, params Task[] alongside)
+        DateTime from, DateTime to, CancellationToken ct, params Task[] alongside)
     {
         var manualTask    = _bolusRepository.GetAsync(from, to, null, null, int.MaxValue, descending: false, kind: BolusKind.Manual, ct: ct);
         var algorithmTask = _bolusRepository.GetAsync(from, to, null, null, int.MaxValue, descending: false, kind: BolusKind.Algorithm, ct: ct);
@@ -180,14 +180,15 @@ public class StatisticsController : ControllerBase
         List<TempBasal> tempBasals,
         DateTime startUtc,
         DateTime endUtc,
-        IReadOnlyCollection<BasalInjection>? recordedBasal)
+        IReadOnlyCollection<BasalInjection>? recordedBasal,
+        CancellationToken ct)
     {
         if (tempBasals.Count > 0 || recordedBasal is { Count: > 0 }) return;
-        if (!await _therapySettingsResolver.HasDataAsync(HttpContext.RequestAborted)) return;
+        if (!await _therapySettingsResolver.HasDataAsync(ct)) return;
 
         var fromMs = new DateTimeOffset(startUtc, TimeSpan.Zero).ToUnixTimeMilliseconds();
         var toMs = new DateTimeOffset(endUtc, TimeSpan.Zero).ToUnixTimeMilliseconds();
-        await foreach (var seg in _basalSegments.GetSegmentsAsync(fromMs, toMs, HttpContext.RequestAborted))
+        await foreach (var seg in _basalSegments.GetSegmentsAsync(fromMs, toMs, ct))
         {
             tempBasals.Add(new TempBasal
             {
@@ -350,6 +351,7 @@ public class StatisticsController : ControllerBase
             request.Entries,
             request.Boluses ?? Enumerable.Empty<Bolus>(),
             request.CarbIntakes ?? Enumerable.Empty<CarbIntake>(),
+            StatisticsService.ClinicalMinimumDays,
             request.Config
         );
         return Ok(result);
@@ -363,16 +365,22 @@ public class StatisticsController : ControllerBase
     [HttpPost("extended-analytics")]
     [EnableRateLimiting(ServiceRegistrationExtensions.StatisticsComputeRateLimitPolicy)]
     [RequireScope(Scope.ReportsRead)]
-    public ActionResult<ExtendedGlucoseAnalytics> AnalyzeGlucoseDataExtended(
-        [FromBody] ExtendedGlucoseAnalyticsRequest request
+    public async Task<ActionResult<ExtendedGlucoseAnalytics>> AnalyzeGlucoseDataExtended(
+        [FromBody] ExtendedGlucoseAnalyticsRequest request,
+        CancellationToken cancellationToken = default
     )
     {
+        var clock = await ResolveTenantTimeZoneAsync(cancellationToken);
         var result = _statisticsService.AnalyzeGlucoseDataExtended(
             request.Entries,
             request.Boluses ?? Enumerable.Empty<Bolus>(),
             request.CarbIntakes ?? Enumerable.Empty<CarbIntake>(),
+            request.StartDate is { } start && request.EndDate is { } end
+                ? StatisticsService.WindowDays(start, end)
+                : StatisticsService.ClinicalMinimumDays,
             request.Population,
-            request.Config
+            request.Config,
+            clock.Zone
         );
         return Ok(result);
     }
@@ -467,7 +475,14 @@ public class StatisticsController : ControllerBase
 
         var result = new ReportAnalysisResult
         {
-            Analysis = _statisticsService.AnalyzeGlucoseDataExtended(entries, boluses, carbs, population),
+            Analysis = _statisticsService.AnalyzeGlucoseDataExtended(
+                entries,
+                boluses,
+                carbs,
+                StatisticsService.WindowDays(startDt, endDt),
+                population,
+                timeZone: clock.Zone
+            ),
             AveragedStats = _statisticsService.CalculateAveragedStats(entries, clock.Zone).ToList(),
             HourlyBandThresholds = _statisticsService.HourlyBandThresholds,
             ContributingDevices = contributingDevices,
@@ -825,6 +840,7 @@ public class StatisticsController : ControllerBase
         var allGlucose = (await glucoseTask).ToList();
         var allCarbs = (await carbTask).ToList();
         var allDeviceEvents = await sessionTask;
+        var clock = await ResolveTenantTimeZoneAsync(cancellationToken);
 
         foreach (var days in periods)
         {
@@ -850,7 +866,9 @@ public class StatisticsController : ControllerBase
                     filteredEntries,
                     filteredBoluses,
                     filteredCarbs,
-                    deviceEvents: allDeviceEvents.Where(e => e.Timestamp >= startDate).ToList()
+                    deviceEvents: allDeviceEvents.Where(e => e.Timestamp >= startDate).ToList(),
+                    windowDays: days,
+                    timeZone: clock.Zone
                 );
 
                 treatmentSummary = _statisticsService.CalculateTreatmentSummary(
@@ -860,7 +878,7 @@ public class StatisticsController : ControllerBase
                 );
 
                 if (algorithmBoluses.Count == 0)
-                    await AddScheduledBasalFallbackAsync(tempBasals, startDate, endDate, basalInjections);
+                    await AddScheduledBasalFallbackAsync(tempBasals, startDate, endDate, basalInjections, cancellationToken);
 
                 insulinDelivery = _statisticsService.CalculateInsulinDeliveryStatistics(
                     filteredBoluses,
@@ -881,26 +899,7 @@ public class StatisticsController : ControllerBase
             {
                 periodGmi = _statisticsService.CalculateGMI(analytics.BasicStats.Mean);
 
-                var actualDaysWithData = filteredEntries
-                    .Where(e => e.Mills > 0)
-                    .Select(e => DateTimeOffset.FromUnixTimeMilliseconds(e.Mills).Date)
-                    .Distinct()
-                    .Count();
-
-                // Context-appropriate recommended minimums:
-                // Short periods can't reasonably need 14 days
-                var recommendedDays = days switch
-                {
-                    <= 3 => days,
-                    <= 7 => 7,
-                    _ => 14, // clinical standard for 30/90 day periods
-                };
-
-                periodReliability = _statisticsService.AssessReliability(
-                    actualDaysWithData,
-                    filteredEntries.Count,
-                    recommendedDays
-                );
+                periodReliability = analytics.Reliability;
 
                 periodGmi.Reliability = periodReliability;
             }
@@ -1251,13 +1250,15 @@ public class StatisticsController : ControllerBase
     /// </summary>
     /// <param name="startDate">Start date of the analysis period</param>
     /// <param name="endDate">End date of the analysis period</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Comprehensive basal analysis with stats, temp basal info, and hourly percentiles</returns>
     [HttpGet("basal-analysis")]
     [RequireScope(Scope.ReportsRead)]
     [RemoteQuery]
     public async Task<ActionResult<BasalAnalysisResponse>> GetBasalAnalysis(
         [FromQuery] DateTime startDate,
-        [FromQuery] DateTime endDate
+        [FromQuery] DateTime endDate,
+        CancellationToken cancellationToken = default
     )
     {
         // Force UTC kind to avoid DateTimeOffset throwing when the server's local
@@ -1266,8 +1267,8 @@ public class StatisticsController : ControllerBase
         var endUtc = DateTime.SpecifyKind(endDate, DateTimeKind.Utc);
 
         // Uncapped for the reason given on FetchInsulinRecordsAsync.
-        var tempBasalTask = _tempBasalRepository.GetAsync((DateTime?)startUtc, (DateTime?)endUtc, null, null, int.MaxValue, descending: false);
-        var algoTask      = _bolusRepository.GetAsync((DateTime?)startUtc, (DateTime?)endUtc, null, null, int.MaxValue, descending: false, kind: BolusKind.Algorithm);
+        var tempBasalTask = _tempBasalRepository.GetAsync((DateTime?)startUtc, (DateTime?)endUtc, null, null, int.MaxValue, descending: false, ct: cancellationToken);
+        var algoTask      = _bolusRepository.GetAsync((DateTime?)startUtc, (DateTime?)endUtc, null, null, int.MaxValue, descending: false, kind: BolusKind.Algorithm, ct: cancellationToken);
 
         await Task.WhenAll(tempBasalTask, algoTask);
 
@@ -1276,11 +1277,11 @@ public class StatisticsController : ControllerBase
 
         var startMs = new DateTimeOffset(startUtc, TimeSpan.Zero).ToUnixTimeMilliseconds();
         var endMs   = new DateTimeOffset(endUtc,   TimeSpan.Zero).ToUnixTimeMilliseconds();
-        await FillMissingScheduledRatesAsync(tempBasals, startMs, endMs, HttpContext.RequestAborted);
+        await FillMissingScheduledRatesAsync(tempBasals, startMs, endMs, cancellationToken);
 
-        await AddScheduledBasalFallbackAsync(tempBasals, startUtc, endUtc, recordedBasal: null);
+        await AddScheduledBasalFallbackAsync(tempBasals, startUtc, endUtc, recordedBasal: null, cancellationToken);
 
-        var tzId = await _therapySettingsResolver.GetTimezoneAsync(ct: HttpContext.RequestAborted);
+        var tzId = await _therapySettingsResolver.GetTimezoneAsync(ct: cancellationToken);
         var userTz = string.IsNullOrEmpty(tzId) ? null : TimeZoneHelper.GetTimeZoneInfoFromId(tzId);
 
         var result = _statisticsService.CalculateBasalAnalysis(
@@ -1302,24 +1303,26 @@ public class StatisticsController : ControllerBase
     /// </summary>
     /// <param name="startDate">Start date of the analysis period (UTC)</param>
     /// <param name="endDate">End date of the analysis period (UTC)</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>24 hourly averages plus the number of days with data</returns>
     [HttpGet("hourly-insulin-delivery")]
     [RequireScope(Scope.ReportsRead)]
     [RemoteQuery]
     public async Task<ActionResult<HourlyInsulinDeliveryResponse>> GetHourlyInsulinDelivery(
         [FromQuery] DateTime startDate,
-        [FromQuery] DateTime endDate
+        [FromQuery] DateTime endDate,
+        CancellationToken cancellationToken = default
     )
     {
         var startUtc = DateTime.SpecifyKind(startDate, DateTimeKind.Utc);
         var endUtc = DateTime.SpecifyKind(endDate, DateTimeKind.Utc);
 
         var (boluses, algorithmBoluses, tempBasals, basalInjections) =
-            await FetchInsulinRecordsAsync(startUtc, endUtc);
+            await FetchInsulinRecordsAsync(startUtc, endUtc, cancellationToken);
 
-        await AddScheduledBasalFallbackAsync(tempBasals, startUtc, endUtc, basalInjections);
+        await AddScheduledBasalFallbackAsync(tempBasals, startUtc, endUtc, basalInjections, cancellationToken);
 
-        var tzId = await _therapySettingsResolver.GetTimezoneAsync(ct: HttpContext.RequestAborted);
+        var tzId = await _therapySettingsResolver.GetTimezoneAsync(ct: cancellationToken);
         var userTz = string.IsNullOrEmpty(tzId) ? null : TimeZoneHelper.GetTimeZoneInfoFromId(tzId);
 
         var result = _statisticsService.CalculateHourlyInsulinDelivery(
@@ -1573,6 +1576,16 @@ public class ExtendedGlucoseAnalyticsRequest
     /// Optional extended analysis configuration
     /// </summary>
     public ExtendedAnalysisConfig? Config { get; set; }
+
+    /// <summary>
+    /// Start of the window the readings were requested for. With <see cref="EndDate"/> it sets the reliability minimum.
+    /// </summary>
+    public DateTime? StartDate { get; set; }
+
+    /// <summary>
+    /// End of the window the readings were requested for.
+    /// </summary>
+    public DateTime? EndDate { get; set; }
 }
 
 /// <summary>
