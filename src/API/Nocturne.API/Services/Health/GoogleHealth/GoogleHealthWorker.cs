@@ -135,6 +135,6 @@ public sealed class GoogleHealthWorker(
             lastErrorAt: now,
             isHealthy: false,
             ct: ct);
-            return true;
+        return true;
     }
 }
