@@ -52,6 +52,10 @@ public abstract class SyncUpsertRepositoryBase<TModel, TEntity> : SyncKeyedRepos
     /// Creates a record, or updates in place the stored row carrying the same
     /// (DataSource, SyncIdentifier).
     /// </summary>
+    /// <remarks>
+    /// Sealed so the single write has one override point, <see cref="UpsertAsync"/>, that every entry
+    /// point passes through.
+    /// </remarks>
     /// <param name="model">The record to create.</param>
     /// <param name="origin">Whether the write is live or a backfill import.</param>
     /// <param name="ct">The cancellation token.</param>
@@ -61,13 +65,20 @@ public abstract class SyncUpsertRepositoryBase<TModel, TEntity> : SyncKeyedRepos
     /// <see cref="SoftDeleteDedupExtensions.WhereBlocksRecreation{TEntity}"/> — the same rule
     /// <see cref="SplitUpsertsAsync"/> applies to a batch.
     /// </exception>
-    public override async Task<TModel> CreateAsync(TModel model, WriteOrigin origin, CancellationToken ct = default)
-        => (await CreateOrUpsertAsync(model, origin, ct)).Record;
+    public sealed override async Task<TModel> CreateAsync(TModel model, WriteOrigin origin, CancellationToken ct = default)
+        => (await UpsertAsync(model, origin, ct)).Record;
 
     /// <inheritdoc cref="CreateAsync" />
     /// <returns>The record, and whether it was inserted rather than written onto the row its sync key matched.</returns>
-    public override async Task<LegacyUpsert<TModel>> CreateOrUpsertAsync(
+    public sealed override async Task<LegacyUpsert<TModel>> CreateOrUpsertAsync(
         TModel model, WriteOrigin origin, CancellationToken ct = default)
+    {
+        var (record, created) = await UpsertAsync(model, origin, ct);
+        return new(record, created);
+    }
+
+    /// <inheritdoc cref="ISyncKeyedRepository{T}.UpsertAsync" />
+    public virtual async Task<SyncUpsert<TModel>> UpsertAsync(TModel model, WriteOrigin origin, CancellationToken ct = default)
     {
         using var live = LiveWriteScope.Open(origin == WriteOrigin.Live);
         await using var ctx = await ContextFactory.CreateAsync(ct);
@@ -89,11 +100,11 @@ public abstract class SyncUpsertRepositoryBase<TModel, TEntity> : SyncKeyedRepos
                 var upserted = ToDomain(existing);
                 // A single explicit upsert always broadcasts (no material-change gate on the single path).
                 await RaiseBroadcastAsync([], [upserted], [], origin, ct);
-                return new(upserted, Created: false);
+                return new SyncUpsert<TModel>(upserted, Created: false);
             }
         }
 
-        return new(await InsertAsync(ctx, entity, origin, ct), Created: true);
+        return new SyncUpsert<TModel>(await InsertAsync(ctx, entity, origin, ct), Created: true);
     }
 
     /// <summary>
