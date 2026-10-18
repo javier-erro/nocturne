@@ -1,6 +1,6 @@
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { remoteCommand, remoteQuery } from "$lib/test-stubs/remote-resource";
 import type { TherapyReview } from "$api";
 
@@ -77,6 +77,11 @@ beforeEach(() => {
   hubRefresh.mockReset().mockResolvedValue(undefined);
   actionTime.refresh.mockReset().mockResolvedValue(undefined);
   actionTime.value = { source: InsulinActionTimeSource.Default, hours: 3, primaryInsulinName: "Fiasp" };
+});
+
+// The units persist to localStorage, which later test files in the browser run share.
+afterEach(() => {
+  glucoseUnits.current = "mg/dl";
 });
 
 describe("therapy settings, nothing yet", () => {

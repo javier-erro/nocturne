@@ -1,6 +1,6 @@
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const profiles = vi.hoisted(() => ({ create: vi.fn() }));
 vi.mock("$api/generated/profiles.generated.remote", () => ({
@@ -15,6 +15,11 @@ const schedule = { profileName: "Default", entries: [{ time: "00:00", low: 90, h
 beforeEach(() => {
   glucoseUnits.current = "mmol";
   profiles.create.mockReset().mockResolvedValue({});
+});
+
+// The units persist to localStorage, which later test files in the browser run share.
+afterEach(() => {
+  glucoseUnits.current = "mg/dl";
 });
 
 describe("TargetRangeCard", () => {
