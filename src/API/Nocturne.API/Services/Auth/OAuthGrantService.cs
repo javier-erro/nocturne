@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Nocturne.Core.Models.Authorization;
 using Nocturne.Infrastructure.Data;
+using Nocturne.Infrastructure.Data.Services;
 using Nocturne.Infrastructure.Data.Entities;
 
 namespace Nocturne.API.Services.Auth;
@@ -14,7 +15,7 @@ namespace Nocturne.API.Services.Auth;
 public class OAuthGrantService : IOAuthGrantService
 {
     private readonly NocturneDbContext _dbContext;
-    private readonly IDbContextFactory<NocturneDbContext> _dbContextFactory;
+    private readonly INocturneDbContextFactory _dbContextFactory;
     private readonly IOAuthClientService _clientService;
     private readonly GuestSessionCacheService _guestSessionCache;
     private readonly GrantRevocationService _grantRevocation;
@@ -32,7 +33,7 @@ public class OAuthGrantService : IOAuthGrantService
     /// <param name="logger">Logger instance.</param>
     public OAuthGrantService(
         NocturneDbContext dbContext,
-        IDbContextFactory<NocturneDbContext> dbContextFactory,
+        INocturneDbContextFactory dbContextFactory,
         IOAuthClientService clientService,
         GuestSessionCacheService guestSessionCache,
         GrantRevocationService grantRevocation,
@@ -204,8 +205,7 @@ public class OAuthGrantService : IOAuthGrantService
         // A dedicated context pinned to the token's tenant: this runs inside the authentication
         // handlers, which may hold a child scope whose context carries no tenant (and therefore no
         // RLS tenant GUC), and an unpinned read would return nothing for every grant.
-        await using var db = await _dbContextFactory.CreateDbContextAsync(ct);
-        db.TenantId = tenantId;
+        await using var db = await _dbContextFactory.CreateForTenantAsync(tenantId, ct);
 
         var state = await db.OAuthGrants
             .AsNoTracking()

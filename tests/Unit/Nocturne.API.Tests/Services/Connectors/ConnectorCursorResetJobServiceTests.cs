@@ -160,10 +160,9 @@ public class ConnectorCursorResetJobServiceTests
     [Fact]
     public async Task StartResetAsync_AttributesTheBackgroundScopeToTheSystem()
     {
-        // The fan-out re-ingests connector data; none of it is a person editing records. The audit
-        // interceptor reads the context-level audit context first and otherwise falls back to the
-        // ambient HTTP request's scope, so both paths of the background scope must say "system" or
-        // the job's writes are attributed to the admin who triggered it.
+        // The fan-out re-ingests connector data; none of it is a person editing records. Every
+        // context the scope creates reads the scope's audit context, so it must say "system" or
+        // the job's writes are attributed as a user's.
         AttributionCapturingEngine? engine = null;
         var (service, _) = BuildService(
             sp => engine = new AttributionCapturingEngine(sp, Connectors(_tenantId)));
@@ -172,9 +171,7 @@ public class ConnectorCursorResetJobServiceTests
         await WaitForTerminalAsync(service, info!.JobId);
 
         engine!.AmbientIsSystemMutation.Should().BeTrue();
-        // A context left unstamped is not neutral: the interceptor then falls back to the
-        // triggering request's user context, so this must be a system context, not merely null.
-        engine.ContextAuditContext.Should().BeOfType<SystemAuditContext>();
+        engine.AmbientEndpoint.Should().Be("service:connector-cursor-reset");
     }
 
     /// <summary>
@@ -187,7 +184,7 @@ public class ConnectorCursorResetJobServiceTests
     {
         public bool? AmbientIsSystemMutation { get; private set; }
 
-        public IAuditContext? ContextAuditContext { get; private set; }
+        public string? AmbientEndpoint { get; private set; }
 
         public Task<TenantConnectorsDto?> GetTenantConnectorsAsync(Guid tenantId, CancellationToken ct)
             => Task.FromResult<TenantConnectorsDto?>(connectors);
@@ -201,8 +198,7 @@ public class ConnectorCursorResetJobServiceTests
         {
             AmbientIsSystemMutation = scopeServices
                 .GetRequiredService<IAuditContext>().IsSystemMutation();
-            ContextAuditContext = scopeServices
-                .GetRequiredService<NocturneDbContext>().AuditContext;
+            AmbientEndpoint = scopeServices.GetRequiredService<IAuditContext>().Endpoint;
 
             return Task.FromResult<TenantCursorResetResult?>(
                 new TenantCursorResetResult(tenantId, connectors.TenantSlug, []));

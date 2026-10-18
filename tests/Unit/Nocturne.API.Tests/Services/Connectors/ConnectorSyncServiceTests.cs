@@ -1,3 +1,4 @@
+using Nocturne.Infrastructure.Data.Services;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -51,14 +52,17 @@ public class ConnectorSyncServiceTests
         // the mutable scoped AuditContext to mark it system for the sync's duration.
         services.AddScoped<IAuditContext, AuditContext>();
 
-        // A real NocturneDbContext: the sync scope stamps its AuditContext property, which the
-        // mutation interceptor prefers over the ambient context. Sqlite rather than InMemory so
-        // the relational model builds; no connection is ever opened because nothing queries.
-        services.AddScoped(_ => new NocturneDbContext(
+        // A real NocturneDbContext reading the scope's audit context, as production's does. Sqlite
+        // rather than InMemory so the relational model builds; no connection is ever opened
+        // because nothing queries.
+        services.AddScoped(sp => new NocturneDbContext(
             new DbContextOptionsBuilder<NocturneDbContext>()
                 .UseSqlite("DataSource=:memory:")
                 .ConfigureWarnings(w => w.Ignore(RelationalEventId.PendingModelChangesWarning))
-                .Options));
+                .Options)
+        {
+            ReadContext = new TenantReadContext(null, null, sp.GetRequiredService<IAuditContext>()),
+        });
 
         foreach (var executor in executors)
         {
@@ -226,8 +230,8 @@ public class ConnectorSyncServiceTests
     [Fact]
     public async Task TriggerSyncAsync_SystemAttributesTheScopeInjectedDbContext()
     {
-        // Writes on the scope's directly-injected context are attributed by that context's own
-        // AuditContext, not the ambient one, so it needs stamping too.
+        // Writes on the scope's directly-injected context are attributed by that context's
+        // AuditContext.
         IAuditContext? captured = null;
         var executor = CreateMockExecutor(
             "test",

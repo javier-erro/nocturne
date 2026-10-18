@@ -1,9 +1,8 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Nocturne.API.Services.Audit;
+using Nocturne.API.Multitenancy;
 using Nocturne.Connectors.Core.Models;
-using Nocturne.Core.Contracts.Audit;
 using Nocturne.Infrastructure.Data;
 using Nocturne.Infrastructure.Data.Entities;
 
@@ -252,20 +251,10 @@ internal sealed class ConnectorResetJob : IConnectorResetProgress
 
         try
         {
-            // Fresh DI scope for the background work — the engine sets the target tenant's context on
-            // this scope (DbContext.TenantId, RLS GUC, ITenantAccessor) before fanning out.
-            using var scope = _serviceProvider.CreateScope();
-
-            // A reset is an operator-triggered re-ingest, not a person editing data, and the job
-            // outlives the request that started it. The audit interceptor falls back to the ambient
-            // HTTP request's scope while that request is still open, so without explicit attribution
-            // whether this job's writes land on the triggering admin depends on a race with the 202
-            // response. The property covers this scope's own context; the pushed scope covers the
-            // contexts ITenantDbContextFactory creates. Mirrors the migration job service.
-            scope.ServiceProvider.GetRequiredService<NocturneDbContext>().AuditContext =
-                SystemAuditContext.ForService(AuditEndpoint);
-            using var systemScope = SystemAuditScope.Push(
-                scope.ServiceProvider.GetRequiredService<IAuditContext>());
+            // The engine sets the target tenant on the scope itself, once it has loaded the tenant.
+            // System-attributed because a reset is an operator-triggered re-ingest that outlives the
+            // request that started it.
+            await using var scope = TenantJobScope.Open(_serviceProvider, tenant: null, AuditEndpoint);
 
             var engine = scope.ServiceProvider.GetRequiredService<IConnectorCursorResetService>();
 

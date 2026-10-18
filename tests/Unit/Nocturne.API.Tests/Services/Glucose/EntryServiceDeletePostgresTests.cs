@@ -56,9 +56,9 @@ public class EntryServiceDeletePostgresTests(EntryServiceDeletePostgresTests.Dat
         public Task DisposeAsync() => Task.CompletedTask;
     }
 
-    private sealed class Factory(Func<NocturneDbContext> create) : ITenantDbContextFactory
+    private sealed class Factory(Func<NocturneDbContext> create) : SingleReaderDbContextFactory
     {
-        public ValueTask<NocturneDbContext> CreateAsync(CancellationToken ct = default) => ValueTask.FromResult(create());
+        public override ValueTask<NocturneDbContext> CreateAsync(CancellationToken ct = default) => ValueTask.FromResult(create());
     }
 
     private sealed record Setup(
@@ -78,8 +78,8 @@ public class EntryServiceDeletePostgresTests(EntryServiceDeletePostgresTests.Dat
             .UseNpgsql(database.AppConnectionString, npgsql => npgsql.EnableRetryOnFailure(
                 maxRetryCount: 3, maxRetryDelay: TimeSpan.FromSeconds(1), errorCodesToAdd: null))
             .AddInterceptors(
-                new TenantConnectionInterceptor(), new MutationAuditInterceptor(Mock.Of<IHttpContextAccessor>()))
-            .Options) { TenantId = tenant, AuditContext = _audit };
+                new TenantConnectionInterceptor(), new MutationAuditInterceptor())
+            .Options) { TenantId = tenant, ReadContext = new TenantReadContext(null, null, _audit) };
 
     private readonly IAuditContext _audit = Mock.Of<IAuditContext>();
 

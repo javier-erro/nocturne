@@ -1,3 +1,4 @@
+using Nocturne.Infrastructure.Data.Extensions;
 using FluentAssertions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Connections.Features;
@@ -57,9 +58,9 @@ public class DataHubHistoryClampTests
         var treatmentService = new Mock<ITreatmentService>();
 
         var services = new ServiceCollection();
-        services.AddScoped<ICategoryReadContext, CategoryReadContext>();
-        services.AddDbContext<NocturneDbContext>(options =>
-            options.UseInMemoryDatabase($"DataHubHistoryClamp_{Guid.NewGuid()}"));
+        var database = $"DataHubHistoryClamp_{Guid.NewGuid()}";
+        services.AddDbContextFactory<NocturneDbContext>(options => options.UseInMemoryDatabase(database));
+        services.AddDataServices();
         services.AddSingleton(entryService.Object);
         services.AddSingleton(treatmentService.Object);
         services.AddSingleton(new DeviceStatusProjectionService(

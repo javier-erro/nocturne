@@ -4,6 +4,7 @@ using Nocturne.Core.Contracts.Multitenancy;
 using Nocturne.Core.Models;
 using Nocturne.Core.Models.Authorization;
 using Nocturne.Infrastructure.Data;
+using Nocturne.Infrastructure.Data.Services;
 using Scope = Nocturne.Core.Models.Authorization.Scope;
 using ScopeTranslator = Nocturne.Core.Models.Authorization.ScopeTranslator;
 
@@ -189,18 +190,15 @@ public class MemberScopeMiddleware
             var membershipId = membership.Id;
             var ip = context.Connection.RemoteIpAddress?.ToString();
             var userAgent = context.Request.Headers.UserAgent.FirstOrDefault();
-            var serviceScopeFactory = context.RequestServices.GetRequiredService<IServiceScopeFactory>();
+            var dbFactory = context.RequestServices.GetRequiredService<INocturneDbContextFactory>();
 
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    // The fresh scope outlives the request, so its context resolves without an
-                    // ambient tenant and carries no pin of its own. Pin it, and key the update on
-                    // the tenant as well as the membership id.
-                    using var scope = serviceScopeFactory.CreateScope();
-                    var db = scope.ServiceProvider.GetRequiredService<NocturneDbContext>();
-                    db.TenantId = tenantId;
+                    // Outlives the request, so it holds the factory rather than the request's
+                    // services. The update is keyed on the tenant as well as the membership id.
+                    await using var db = await dbFactory.CreateForTenantAsync(tenantId);
                     await db.TenantMembers
                         .Where(tm => tm.Id == membershipId && tm.TenantId == tenantId)
                         .ExecuteUpdateAsync(s => s

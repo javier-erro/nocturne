@@ -1,3 +1,4 @@
+using Nocturne.Infrastructure.Data.Services;
 using FluentAssertions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
@@ -269,7 +270,7 @@ public class SaveChangesChangeDetectionTests : IDisposable
     private SqliteTestDatabase NewStore(Guid tenantId)
     {
         var db = TestDbContextFactory.CreateSqliteWithTenant(
-            tenantId, "test", new MutationAuditInterceptor(Mock.Of<IHttpContextAccessor>()));
+            tenantId, "test", new MutationAuditInterceptor());
         _databases.Add(db);
         return db;
     }
@@ -281,7 +282,7 @@ public class SaveChangesChangeDetectionTests : IDisposable
     private static NocturneDbContext NewAuditedContext(SqliteTestDatabase db)
     {
         var ctx = db.CreateContext();
-        ctx.AuditContext = new StubAuditContext();
+        ctx.ReadContext = new TenantReadContext(null, null, new StubAuditContext());
         return ctx;
     }
 

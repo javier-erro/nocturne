@@ -112,13 +112,13 @@ public class V4GoldenFixture : IAsyncLifetime
     }
 
     /// <summary>
-    /// Runs a read against a tenant-scoped context (via the production <c>ITenantDbContextFactory</c>)
+    /// Runs a read against a tenant-scoped context (via the production <c>INocturneDbContextFactory</c>)
     /// for snapshotting persisted state after a scenario.
     /// </summary>
     public async Task<T> QueryAsync<T>(Guid tenantId, Func<NocturneDbContext, Task<T>> query)
     {
         PinTenant(tenantId);
-        var factory = _provider!.GetRequiredService<ITenantDbContextFactory>();
+        var factory = _provider!.GetRequiredService<INocturneDbContextFactory>();
         await using var ctx = await factory.CreateAsync();
         return await query(ctx);
     }

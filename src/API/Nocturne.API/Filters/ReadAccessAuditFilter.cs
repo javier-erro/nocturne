@@ -2,12 +2,11 @@ using System.Collections;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
-using Microsoft.EntityFrameworkCore;
 using Nocturne.API.Extensions;
 using Nocturne.Core.Contracts.Audit;
 using Nocturne.Core.Contracts.Multitenancy;
 using Nocturne.Core.Models.V4;
-using Nocturne.Infrastructure.Data;
+using Nocturne.Infrastructure.Data.Services;
 using Nocturne.Infrastructure.Data.Entities;
 
 namespace Nocturne.API.Filters;
@@ -25,13 +24,13 @@ public class ReadAccessAuditFilter : IAsyncResultFilter, IAsyncExceptionFilter
 
     private readonly ITenantAuditConfigCache _configCache;
     private readonly IAuditContext _auditContext;
-    private readonly IDbContextFactory<NocturneDbContext> _contextFactory;
+    private readonly INocturneDbContextFactory _contextFactory;
     private readonly ILogger<ReadAccessAuditFilter> _logger;
 
     public ReadAccessAuditFilter(
         ITenantAuditConfigCache configCache,
         IAuditContext auditContext,
-        IDbContextFactory<NocturneDbContext> contextFactory,
+        INocturneDbContextFactory contextFactory,
         ILogger<ReadAccessAuditFilter> logger)
     {
         _configCache = configCache;
@@ -186,8 +185,7 @@ public class ReadAccessAuditFilter : IAsyncResultFilter, IAsyncExceptionFilter
     {
         try
         {
-            await using var ctx = await _contextFactory.CreateDbContextAsync();
-            ctx.TenantId = tenantId;
+            await using var ctx = await _contextFactory.CreateForTenantAsync(tenantId);
             ctx.ReadAccessLog.Add(entry);
             await ctx.SaveChangesAsync();
         }

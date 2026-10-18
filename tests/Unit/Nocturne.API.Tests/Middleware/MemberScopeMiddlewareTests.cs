@@ -605,7 +605,7 @@ public class MemberScopeMiddlewareTests
 
         category.IsHistoryClamped.Should().BeTrue();
         scoped.HistoryClamped.Should().BeTrue(
-            "the scoped context was pinned before authentication, so it must be stamped here");
+            "a context created before authentication reads the clamp once it is resolved");
     }
 
     [Fact]
@@ -671,8 +671,8 @@ public class MemberScopeMiddlewareTests
     }
 
     /// <summary>
-    /// Runs the middleware with a real <see cref="ICategoryReadContext"/> and scoped context, as
-    /// the request pipeline registers them, and returns both carriers of the history clamp.
+    /// Runs the middleware with a real <see cref="ICategoryReadContext"/> and a scoped context reading
+    /// it, as the request pipeline registers them, and returns both.
     /// </summary>
     private static async Task<(CategoryReadContext Category, NocturneDbContext Scoped)> ResolveClampAsync(
         SqliteTestDatabase db,
@@ -683,9 +683,11 @@ public class MemberScopeMiddlewareTests
     {
         var category = new CategoryReadContext();
         var scoped = db.CreateContext();
+        scoped.ReadContext = new TenantReadContext(null, category, null);
         var services = new ServiceCollection();
         services.AddSingleton<ICategoryReadContext>(category);
         services.AddSingleton(scoped);
+        services.AddSingleton(db.ContextFactory.AsNocturneFactory());
         using var provider = services.BuildServiceProvider();
 
         var context = new DefaultHttpContext { RequestServices = provider };
@@ -736,6 +738,7 @@ public class MemberScopeMiddlewareTests
     {
         var services = new ServiceCollection();
         services.AddScoped(_ => db.CreateContext());
+        services.AddSingleton(db.ContextFactory.AsNocturneFactory());
         using var provider = services.BuildServiceProvider();
 
         var context = new DefaultHttpContext { RequestServices = provider };

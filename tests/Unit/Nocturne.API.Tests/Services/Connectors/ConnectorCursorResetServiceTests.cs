@@ -1,3 +1,4 @@
+using Nocturne.Tests.Shared.Infrastructure;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -79,7 +80,7 @@ public class ConnectorCursorResetServiceTests
             .Callback<TenantContext>(c => setContext = c);
 
         var service = new ConnectorCursorResetService(
-            db, syncService.Object, tenantAccessor.Object,
+            db, new TestNocturneDbContextFactory(db), syncService.Object, tenantAccessor.Object,
             Mock.Of<ILogger<ConnectorCursorResetService>>());
 
         var from = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -109,7 +110,7 @@ public class ConnectorCursorResetServiceTests
         var db = CreateDb();
         var syncService = new Mock<IConnectorSyncService>();
         var service = new ConnectorCursorResetService(
-            db, syncService.Object, Mock.Of<ITenantAccessor>(),
+            db, new TestNocturneDbContextFactory(db), syncService.Object, Mock.Of<ITenantAccessor>(),
             Mock.Of<ILogger<ConnectorCursorResetService>>());
 
         var result = await service.ResetTenantCursorsAsync(
@@ -134,7 +135,7 @@ public class ConnectorCursorResetServiceTests
             .ThrowsAsync(new InvalidOperationException("nope"));
 
         var service = new ConnectorCursorResetService(
-            db, syncService.Object, Mock.Of<ITenantAccessor>(),
+            db, new TestNocturneDbContextFactory(db), syncService.Object, Mock.Of<ITenantAccessor>(),
             Mock.Of<ILogger<ConnectorCursorResetService>>());
 
         var progress = new RecordingProgress();

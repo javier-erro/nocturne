@@ -1,3 +1,4 @@
+using Nocturne.Core.Contracts.Audit;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
@@ -23,7 +24,10 @@ namespace Nocturne.Infrastructure.Data.Services;
 public class DeduplicationService : IDeduplicationService
 {
     private readonly NocturneDbContext _context;
+    private const string JobAuditEndpoint = "service:deduplication";
+
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly ICategoryReadContext? _categoryReadContext;
     private readonly ILogger<DeduplicationService> _logger;
 
     /// <summary>
@@ -184,12 +188,14 @@ public class DeduplicationService : IDeduplicationService
         NocturneDbContext context,
         IServiceScopeFactory scopeFactory,
         ILogger<DeduplicationService> logger,
-        ITenantAccessor? tenantAccessor = null)
+        ITenantAccessor? tenantAccessor = null,
+        ICategoryReadContext? categoryReadContext = null)
     {
         _context = context;
         _scopeFactory = scopeFactory;
         _logger = logger;
         _tenantAccessor = tenantAccessor;
+        _categoryReadContext = categoryReadContext;
     }
 
     /// <summary>
@@ -1832,6 +1838,8 @@ public class DeduplicationService : IDeduplicationService
             StartedAt = DateTime.UtcNow
         };
 
+        var callerClamped = _categoryReadContext?.IsHistoryClamped == true;
+
         _runningJobs[jobId] = status;
         _jobTenants[jobId] = tenantContext.TenantId;
         _jobCancellations[jobId] = cts;
@@ -1839,13 +1847,14 @@ public class DeduplicationService : IDeduplicationService
         // Start the job in the background with its own scope
         _ = Task.Run(async () =>
         {
-            // Create a new scope for the background work to get a fresh DbContext
+            // The job outlives the request, so it runs in a scope of its own: the caller's tenant
+            // and history clamp, its writes attributed to the system.
             await using var scope = _scopeFactory.CreateAsyncScope();
-
-            // Pin the tenant before anything is resolved from the scope: the scoped DbContext reads
-            // the accessor in its factory, so resolving the service first would bake in an empty
-            // tenant. Same ordering as DeduplicationReconciliationBackgroundService.
             scope.ServiceProvider.GetRequiredService<ITenantAccessor>().SetTenant(tenantContext);
+            if (callerClamped)
+                scope.ServiceProvider.GetRequiredService<ICategoryReadContext>().ClampMemberHistory();
+            if (scope.ServiceProvider.GetService<IAuditContext>() is ISystemAttributable audit)
+                audit.AttributeToSystem(JobAuditEndpoint);
 
             var scopedService = scope.ServiceProvider.GetRequiredService<IDeduplicationService>();
 
