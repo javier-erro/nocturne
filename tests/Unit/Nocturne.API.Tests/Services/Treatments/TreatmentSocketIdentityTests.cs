@@ -88,11 +88,12 @@ public class TreatmentSocketIdentityTests : IDisposable
                 It.IsAny<long>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((Guid?)null);
 
+        var stateSpans = Mock.Of<IStateSpanService>();
         var decomposer = new TreatmentDecomposer(
             _context,
             bolusRepo, tempBasalRepo,
             carbRepo, bgCheckRepo, noteRepo, deviceEventRepo, bolusCalcRepo,
-            Mock.Of<IStateSpanService>(),
+            stateSpans,
             foods.Object,
             devices.Object,
             Mock.Of<IPatientDeviceStamper>(),
@@ -100,16 +101,15 @@ public class TreatmentSocketIdentityTests : IDisposable
             Mock.Of<IActiveProfileResolver>(),
             Mock.Of<IPatientInsulinRepository>(),
             caller,
-            dedup,
             NullLogger<TreatmentDecomposer>.Instance);
 
-        var projection = new V4ToLegacyProjectionService(
+        var projection = new NoStateSpanTreatments(new V4ToLegacyProjectionService(
             Mock.Of<ISensorGlucoseRepository>(),
             bolusRepo, carbRepo, bgCheckRepo, noteRepo, deviceEventRepo,
             tempBasalRepo, bolusCalcRepo,
             foods.Object,
             _context,
-            NullLogger<V4ToLegacyProjectionService>.Instance);
+            NullLogger<V4ToLegacyProjectionService>.Instance));
 
         var pipeline = new DecompositionPipeline(
             new ServiceCollection().AddSingleton<IDecomposer<Treatment>>(decomposer).BuildServiceProvider(),
@@ -118,6 +118,7 @@ public class TreatmentSocketIdentityTests : IDisposable
         var store = new TreatmentReadService(
             projection, decomposer, pipeline,
             tempBasalRepo, bolusRepo, carbRepo, bgCheckRepo, noteRepo, deviceEventRepo, bolusCalcRepo,
+            stateSpans,
             NullLogger<TreatmentReadService>.Instance);
 
         var broadcast = new SignalRBroadcastService(
@@ -651,4 +652,38 @@ public class TreatmentSocketIdentityTests : IDisposable
         (await _service.GetTreatmentsAsync(count: 10)).Should().BeEmpty();
         Events("create").Should().ContainSingle("only the first upload was written");
     }
+}
+
+/// <summary>
+/// The projection, with no treatment stored as a state span: none of these tests writes one, and the
+/// span lookups match on PostgreSQL JSON containment, which SQLite cannot translate.
+/// </summary>
+file sealed class NoStateSpanTreatments(IV4ToLegacyProjectionService inner) : IV4ToLegacyProjectionService
+{
+    public Task<IEnumerable<Entry>> GetProjectedEntriesAsync(
+        long? fromMills, long? toMills, int limit, int offset, bool descending, CancellationToken ct = default) =>
+        inner.GetProjectedEntriesAsync(fromMills, toMills, limit, offset, descending, ct);
+
+    public Task<Entry?> GetLatestProjectedEntryAsync(CancellationToken ct = default) =>
+        inner.GetLatestProjectedEntryAsync(ct);
+
+    public Task<IEnumerable<Treatment>> GetProjectedTreatmentsAsync(
+        long? fromMills, long? toMills, int limit, bool nativeOnly = true, CancellationToken ct = default) =>
+        inner.GetProjectedTreatmentsAsync(fromMills, toMills, limit, nativeOnly, ct);
+
+    public Task<IEnumerable<Treatment>> GetProjectedTreatmentsModifiedSinceAsync(
+        long lastModifiedMills, int limit, CancellationToken ct = default) =>
+        inner.GetProjectedTreatmentsModifiedSinceAsync(lastModifiedMills, limit, ct);
+
+    public Task<Treatment?> GetProjectedStateSpanTreatmentAsync(string id, CancellationToken ct = default) =>
+        Task.FromResult<Treatment?>(null);
+
+    public Task<string?> GetStateSpanTreatmentIdAsync(string id, CancellationToken ct = default) =>
+        Task.FromResult<string?>(null);
+
+    public Task<bool> IsStateSpanDeletedByUserAsync(string id, CancellationToken ct = default) =>
+        Task.FromResult(false);
+
+    public Task<long> CountProjectedStateSpanTreatmentsAsync(long? fromMills, long? toMills, CancellationToken ct = default) =>
+        Task.FromResult(0L);
 }

@@ -182,10 +182,11 @@ public class RecentTreatmentRepublishTests : IDisposable
             _context, bolus, EmptyLegacyKeyed.Of<ITempBasalRepository, Nocturne.Core.Models.V4.TempBasal>(), carbs, bgChecks, notes, deviceEvents, calculations,
             Mock.Of<IStateSpanService>(), Mock.Of<ITreatmentFoodService>(), Mock.Of<IDeviceService>(),
             Mock.Of<IPatientDeviceStamper>(), Mock.Of<IProfileDecomposer>(), Mock.Of<IActiveProfileResolver>(),
-            Mock.Of<IPatientInsulinRepository>(), audit, dedup, NullLogger<TreatmentDecomposer>.Instance);
+            Mock.Of<IPatientInsulinRepository>(), audit, NullLogger<TreatmentDecomposer>.Instance);
         var store = new TreatmentReadService(
             Mock.Of<IV4ToLegacyProjectionService>(), decomposer, Mock.Of<IDecompositionPipeline>(),
             EmptyLegacyKeyed.Of<ITempBasalRepository, Nocturne.Core.Models.V4.TempBasal>(), bolus, carbs, bgChecks, notes, deviceEvents, calculations,
+            Mock.Of<IStateSpanService>(),
             NullLogger<TreatmentReadService>.Instance);
         var service = new TreatmentService(
             store, decomposer, Mock.Of<ITreatmentCache>(), Mock.Of<IDataEventSink<Treatment>>(),

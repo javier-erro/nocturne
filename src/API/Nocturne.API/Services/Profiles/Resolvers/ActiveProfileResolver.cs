@@ -13,13 +13,14 @@ namespace Nocturne.API.Services.Profiles.Resolvers;
 /// <summary>
 /// Resolves the active profile name and CircadianPercentageProfile adjustments at a given time
 /// by querying Profile <see cref="StateSpan"/> records via <see cref="IStateSpanService"/>.
-/// Results are cached per tenant with a 5-second TTL, keyed by minute-rounded time.
+/// Candidate spans are cached per tenant with a 5-second TTL, keyed by minute.
 /// </summary>
 internal sealed class ActiveProfileResolver : IActiveProfileResolver
 {
     private readonly IStateSpanService _stateSpanService;
     private readonly ITenantAccessor _tenantAccessor;
     private readonly IMemoryCache _cache;
+    private readonly ICategoryReadContext _categoryReadContext;
     private readonly ILogger<ActiveProfileResolver> _logger;
 
     private const int CacheTtlSeconds = 5;
@@ -29,11 +30,13 @@ internal sealed class ActiveProfileResolver : IActiveProfileResolver
         IStateSpanService stateSpanService,
         ITenantAccessor tenantAccessor,
         IMemoryCache cache,
+        ICategoryReadContext categoryReadContext,
         ILogger<ActiveProfileResolver> logger)
     {
         _stateSpanService = stateSpanService;
         _tenantAccessor = tenantAccessor;
         _cache = cache;
+        _categoryReadContext = categoryReadContext;
         _logger = logger;
     }
 
@@ -80,35 +83,36 @@ internal sealed class ActiveProfileResolver : IActiveProfileResolver
         return ExtractInsulinContext(span);
     }
 
+    /// <remarks>
+    /// The cache holds the newest spans that started by the end of the minute, so the active span is picked at
+    /// the exact time and the answer does not depend on which lookup in the minute came first. It is keyed
+    /// by tenant, not history window, so a history-clamped request, which sees only the last 24 hours of
+    /// <c>state_spans</c>, neither reads nor writes it.
+    /// </remarks>
     private async Task<StateSpan?> GetActiveProfileSpanAsync(long timeMills, CancellationToken ct)
     {
-        var minuteRounded = timeMills / MillisPerMinute * MillisPerMinute;
+        var minuteStart = timeMills / MillisPerMinute * MillisPerMinute;
         var tenantId = _tenantAccessor.TenantId;
-        var cacheKey = $"ActiveProfile:{tenantId}:{minuteRounded}";
+        var cacheKey = $"ActiveProfile:{tenantId}:{minuteStart}";
+        var useCache = !_categoryReadContext.IsHistoryClamped;
 
-        if (_cache.TryGetValue(cacheKey, out StateSpan? cached))
-            return cached;
+        if (!useCache || !_cache.TryGetValue(cacheKey, out IReadOnlyList<StateSpan>? candidates) || candidates is null)
+        {
+            var minuteEnd = DateTimeOffset.FromUnixTimeMilliseconds(minuteStart + MillisPerMinute - 1).UtcDateTime;
+            candidates = (await _stateSpanService.GetStateSpansAsync(
+                category: StateSpanCategory.Profile,
+                to: minuteEnd,
+                count: 100,
+                cancellationToken: ct)).ToList();
 
-        var queryTime = DateTimeOffset.FromUnixTimeMilliseconds(timeMills).UtcDateTime;
+            if (useCache)
+                _cache.Set(cacheKey, candidates, TimeSpan.FromSeconds(CacheTtlSeconds));
+        }
 
-        // Query profile StateSpans that could cover the requested time.
-        // We query with to=queryTime so we get spans that started at or before the time.
-        var spans = await _stateSpanService.GetStateSpansAsync(
-            category: StateSpanCategory.Profile,
-            to: queryTime,
-            count: 100,
-            cancellationToken: ct);
-
-        // Find the span that covers the requested time:
-        // StartMills <= timeMills AND (EndMills is null OR EndMills > timeMills)
-        var activeSpan = spans
+        return candidates
             .Where(s => s.StartMills <= timeMills && (!s.EndMills.HasValue || s.EndMills.Value > timeMills))
             .OrderByDescending(s => s.StartMills)
             .FirstOrDefault();
-
-        _cache.Set(cacheKey, activeSpan, TimeSpan.FromSeconds(CacheTtlSeconds));
-
-        return activeSpan;
     }
 
     private static string? ExtractProfileName(StateSpan? span)

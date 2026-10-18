@@ -1,7 +1,9 @@
 using FluentAssertions;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using Nocturne.API.Services.Treatments;
+using Nocturne.Core.Contracts.Glucose;
 using Nocturne.Core.Contracts.Treatments;
 using Nocturne.Core.Contracts.V4;
 using Nocturne.Core.Contracts.V4.Repositories;
@@ -38,6 +40,7 @@ public class TreatmentReadServiceTests
             _noteRepo.Object,
             _deviceEventRepo.Object,
             _bolusCalcRepo.Object,
+            Mock.Of<IStateSpanService>(),
             NullLogger<TreatmentReadService>.Instance);
     }
 
@@ -252,20 +255,42 @@ public class TreatmentReadServiceTests
 
     /// <summary>
     /// A treatment stored as a span (an override here) whose span the user deleted wrote nothing: it
-    /// is answered under the id the deleted span was answered by, the span's original id, and is not
-    /// among the written treatments an event announces.
+    /// is answered under the id the deleted span was served by, the span's own id, and is not among
+    /// the written treatments an event announces.
     /// </summary>
     [Fact]
     public async Task CreateAsync_AnswersAReuploadOfADeletedSpanUnderItsIdWithoutCountingItWritten()
     {
+        var deletedSpan = Guid.NewGuid();
         var treatment = new Treatment { Id = "override-1", Mills = 1000, EventType = "Temporary Override", Duration = 30 };
+        var decomposition = new DecompositionResult { CorrelationId = Guid.NewGuid(), SkippedDeleted = 1 };
+        decomposition.RefusedRecords.Add(new RefusedRecord(typeof(StateSpan), deletedSpan));
 
-        var result = await CreateWithAsync(treatment, new DecompositionResult { CorrelationId = Guid.NewGuid(), SkippedDeleted = 1 });
+        var result = await CreateWithAsync(treatment, decomposition);
 
         result.Should().BeEmpty();
         result.Updated.Should().BeEmpty();
         result.SkippedDeleted.Should().Be(1);
-        result.Settled.Should().ContainSingle().Which.Id.Should().Be("override-1");
+        result.Settled.Should().ContainSingle().Which.Id.Should().Be(deletedSpan.ToString());
+    }
+
+    /// <summary>
+    /// A treatment stored as a served span (an override here) is answered under the span's id, which
+    /// reads serve it by, and carries its original id as the legacy id write-back sends.
+    /// </summary>
+    [Fact]
+    public async Task CreateAsync_NamesATreatmentStoredAsASpanByTheSpan()
+    {
+        var span = new StateSpan { Id = Guid.NewGuid().ToString(), OriginalId = "override-1", Category = StateSpanCategory.Override };
+        var treatment = new Treatment { Id = "override-1", Mills = 1000, EventType = "Temporary Override", Duration = 30 };
+
+        var result = await CreateWithAsync(treatment, Wrote([span]));
+
+        var created = result.Should().ContainSingle().Subject;
+        created.Id.Should().Be(span.Id);
+        created.LegacyId.Should().Be("override-1");
+        created.RecordId.Should().Be(Guid.Parse(span.Id));
+        treatment.Id.Should().Be("override-1", "the submitted treatment is left untouched");
     }
 
     private async Task<BulkWrite<Treatment>> CreateWithAsync(Treatment treatment, DecompositionResult result)
@@ -768,13 +793,13 @@ public class TreatmentReadServiceTests
     }
 
     [Fact]
-    public async Task UpdateAsync_ByAnEchoedId_ReadsTheResultBackByTheRecordsOwnId()
+    public async Task UpdateAsync_ByAnEchoedId_ReadsTheResultBackByTheUpsertKey()
     {
         var syncIdentifier = Guid.NewGuid().ToString().ToUpperInvariant();
         var echoed = MongoObjectId.Coerce(syncIdentifier)!;
         var carb = new CarbIntake { Id = Guid.CreateVersion7(), LegacyId = syncIdentifier };
         _carbIntakeRepo.Setup(r => r.GetByLegacyIdUuidPrefixAsync(echoed, It.IsAny<CancellationToken>())).ReturnsAsync(carb);
-        _carbIntakeRepo.Setup(r => r.GetByIdAsync(carb.Id, It.IsAny<CancellationToken>())).ReturnsAsync(carb);
+        _carbIntakeRepo.Setup(r => r.GetByLegacyIdAsync(syncIdentifier, It.IsAny<CancellationToken>())).ReturnsAsync(carb);
         ProjectAs(carb.Id);
         _decomposer
             .Setup(d => d.DecomposeAsync(It.IsAny<Treatment>(), It.IsAny<WriteOrigin>(), It.IsAny<CancellationToken>()))
@@ -788,6 +813,53 @@ public class TreatmentReadServiceTests
             It.IsAny<WriteOrigin>(), It.IsAny<CancellationToken>()), Times.Once);
         _carbIntakeRepo.Verify(r => r.GetByLegacyIdUuidPrefixAsync(echoed, It.IsAny<CancellationToken>()), Times.Once);
         _carbIntakeRepo.Verify(r => r.GetByLegacyIdHashAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task UpdateAsync_WhenTheStoredTreatmentFailsToDecompose_Propagates(bool stateSpan)
+    {
+        const string id = "69F15FD2-8075-4DEB-AEA3-4352F455840D";
+        if (stateSpan)
+        {
+            _projection
+                .Setup(p => p.GetProjectedStateSpanTreatmentAsync(id, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new Treatment { Id = "span-1" });
+            _projection
+                .Setup(p => p.GetStateSpanTreatmentIdAsync(id, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(id);
+        }
+        else
+        {
+            var carb = new CarbIntake { Id = Guid.CreateVersion7(), LegacyId = id };
+            _carbIntakeRepo.Setup(r => r.GetByLegacyIdAsync(id, It.IsAny<CancellationToken>())).ReturnsAsync(carb);
+            ProjectAs(carb.Id);
+        }
+
+        _decomposer
+            .Setup(d => d.DecomposeAsync(It.IsAny<Treatment>(), It.IsAny<WriteOrigin>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new DbUpdateException("store down"));
+
+        var update = () => _service.UpdateAsync(id, new Treatment { EventType = "Carb Correction", Carbs = 25 });
+
+        await update.Should().ThrowAsync<DbUpdateException>();
+    }
+
+    [Fact]
+    public async Task UpdateAsync_WhenTheCallerCancels_Propagates()
+    {
+        const string id = "69F15FD2-8075-4DEB-AEA3-4352F455840D";
+        var carb = new CarbIntake { Id = Guid.CreateVersion7(), LegacyId = id };
+        _carbIntakeRepo.Setup(r => r.GetByLegacyIdAsync(id, It.IsAny<CancellationToken>())).ReturnsAsync(carb);
+        ProjectAs(carb.Id);
+        _decomposer
+            .Setup(d => d.DecomposeAsync(It.IsAny<Treatment>(), It.IsAny<WriteOrigin>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new OperationCanceledException());
+
+        var update = () => _service.UpdateAsync(id, new Treatment { EventType = "Carb Correction" });
+
+        await update.Should().ThrowAsync<OperationCanceledException>();
     }
 
     [Fact]
