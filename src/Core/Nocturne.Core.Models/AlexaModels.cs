@@ -55,15 +55,9 @@ public class AlexaIntent
 {
     public string Name { get; set; } = string.Empty;
 
-    /// <summary>
-    /// Intent slots (parameters)
-    /// </summary>
     public Dictionary<string, AlexaSlot> Slots { get; set; } = new();
 }
 
-/// <summary>
-/// Alexa slot (intent parameter)
-/// </summary>
 public class AlexaSlot
 {
     public string Name { get; set; } = string.Empty;
@@ -82,9 +76,6 @@ public class AlexaResponseBody
 
     public bool ShouldEndSession { get; set; } = true;
 
-    /// <summary>
-    /// Card to display (optional)
-    /// </summary>
     public AlexaCard? Card { get; set; }
 
     /// <summary>
@@ -98,9 +89,6 @@ public class AlexaResponseBody
 /// </summary>
 public class AlexaResponseDetails : AlexaResponseBody { }
 
-/// <summary>
-/// Alexa card for displaying information
-/// </summary>
 public class AlexaCard
 {
     /// <summary>
