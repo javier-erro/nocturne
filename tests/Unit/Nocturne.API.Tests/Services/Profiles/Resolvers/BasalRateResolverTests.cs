@@ -62,6 +62,22 @@ public class BasalRateResolverTests : IDisposable
     }
 
     [Fact]
+    public async Task A_schedule_version_cached_for_one_minute_is_not_served_for_the_next()
+    {
+        var edit = DateTimeOffset.FromUnixTimeMilliseconds(NoonMills + 60_000).UtcDateTime;
+        _repo.Setup(r => r.GetActiveAtAsync("Default", It.Is<DateTime>(t => t < edit), default))
+            .ReturnsAsync(MakeSchedule((0, 0.8)));
+        _repo.Setup(r => r.GetActiveAtAsync("Default", It.Is<DateTime>(t => t >= edit), default))
+            .ReturnsAsync(MakeSchedule((0, 1.2)));
+
+        var before = await _sut.GetBasalRateAsync(NoonMills);
+        var after = await _sut.GetBasalRateAsync(NoonMills + 90_000);
+
+        before.Should().Be(0.8);
+        after.Should().Be(1.2);
+    }
+
+    [Fact]
     public async Task AppliesCcpPercentageScaling()
     {
         var schedule = MakeSchedule((0, 1.0));
