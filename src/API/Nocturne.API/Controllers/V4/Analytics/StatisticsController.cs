@@ -26,7 +26,7 @@ namespace Nocturne.API.Controllers.V4.Analytics;
 /// time-in-range, glycemic variability, GMI, GRI, basal/bolus ratios, and AID system metrics.
 /// </summary>
 /// <remarks>
-/// <c>GET /periods</c> caches for five minutes through <see cref="ICacheService"/>;
+/// <c>GET /periods</c> caches for five minutes through <see cref="ITenantCache"/>;
 /// <c>GET /range-analytics</c>, <c>GET /weekday-averages</c> and <c>GET /hourly-patterns</c>
 /// carry a 60-second client-only <see cref="ResponseCacheAttribute"/>. No other action caches.
 ///
@@ -790,6 +790,8 @@ public class StatisticsController : ControllerBase
     /// <see cref="AddScheduledBasalFallbackAsync"/> for the rest of the gate.
     /// GMI reliability is assessed per-period using context-appropriate recommended-day minimums
     /// (e.g., 1-day periods cannot require 14 days of data).
+    /// The cached value breaks the rule on <see cref="ITenantCache"/> for what a value may contain
+    /// (#2138).
     /// </remarks>
     [HttpGet("periods")]
     [RequireScope(Scope.GlucoseRead)]
