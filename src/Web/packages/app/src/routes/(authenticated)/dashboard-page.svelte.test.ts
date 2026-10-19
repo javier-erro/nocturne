@@ -31,6 +31,12 @@ vi.mock("$lib/components/dashboard", async () => ({
     .default,
 }));
 
+const uiSettings = vi.hoisted(() => ({ features: {} as FeatureSettings }));
+
+vi.mock("$api/ui-settings.remote", () => ({
+  getUiSettings: () => remoteQuery(() => ({ features: uiSettings.features })),
+}));
+
 vi.mock("$api/generated/connectorStatus.generated.remote", () => ({
   getStatus: () => remoteQuery(() => []),
 }));
@@ -98,8 +104,9 @@ function renderDashboard(
     currentReadingLoaded = false,
   }: { data?: HarnessProps["data"]; withRealtimeStore?: boolean; currentReadingLoaded?: boolean } = {}
 ) {
+  uiSettings.features = settings;
   render(DashboardPageHarness, {
-    props: { features: settings, data, withRealtimeStore, currentReadingLoaded },
+    props: { data, withRealtimeStore, currentReadingLoaded },
   });
 }
 
