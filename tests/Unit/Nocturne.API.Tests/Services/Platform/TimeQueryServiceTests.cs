@@ -94,6 +94,9 @@ public class TimeQueryServiceTests
                     It.IsAny<string>(),
                     It.IsAny<int>(),
                     It.IsAny<int>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<bool>(),
                     It.IsAny<CancellationToken>()
                 )
             )
@@ -113,9 +116,12 @@ public class TimeQueryServiceTests
         _mockEntryService.Verify(
             x =>
                 x.GetEntriesWithAdvancedFilterAsync(
+                    null,
+                    1000,
+                    0,
                     It.IsAny<string>(),
-                    It.IsAny<int>(),
-                    It.IsAny<int>(),
+                    null,
+                    false,
                     It.IsAny<CancellationToken>()
                 ),
             Times.Once
@@ -154,6 +160,9 @@ public class TimeQueryServiceTests
                     It.IsAny<string>(),
                     It.IsAny<int>(),
                     It.IsAny<int>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<bool>(),
                     It.IsAny<CancellationToken>()
                 )
             )
@@ -184,6 +193,9 @@ public class TimeQueryServiceTests
                             It.IsAny<string>(),
                             It.IsAny<int>(),
                             It.IsAny<int>(),
+                            It.IsAny<string>(),
+                            It.IsAny<string>(),
+                            It.IsAny<bool>(),
                             It.IsAny<CancellationToken>()
                         ),
                     Times.Once
@@ -265,6 +277,9 @@ public class TimeQueryServiceTests
                     It.IsAny<string>(),
                     It.IsAny<int>(),
                     It.IsAny<int>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<bool>(),
                     It.IsAny<CancellationToken>()
                 )
             )
@@ -307,6 +322,9 @@ public class TimeQueryServiceTests
                     It.IsAny<string>(),
                     It.IsAny<int>(),
                     It.IsAny<int>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<bool>(),
                     It.IsAny<CancellationToken>()
                 )
             )
@@ -355,6 +373,9 @@ public class TimeQueryServiceTests
                     It.IsAny<string>(),
                     It.IsAny<int>(),
                     It.IsAny<int>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<bool>(),
                     It.IsAny<CancellationToken>()
                 )
             )
@@ -399,6 +420,9 @@ public class TimeQueryServiceTests
                     It.IsAny<string>(),
                     It.IsAny<int>(),
                     It.IsAny<int>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<bool>(),
                     It.IsAny<CancellationToken>()
                 )
             )
@@ -411,9 +435,12 @@ public class TimeQueryServiceTests
         _mockEntryService.Verify(
             x =>
                 x.GetEntriesWithAdvancedFilterAsync(
+                    It.IsAny<string>(),
+                    It.IsAny<int>(),
+                    It.IsAny<int>(),
                     It.Is<string>(f => !f.Contains("find[type]")),
-                    It.IsAny<int>(),
-                    It.IsAny<int>(),
+                    It.IsAny<string>(),
+                    It.IsAny<bool>(),
                     It.IsAny<CancellationToken>()
                 ),
             Times.Once
@@ -453,6 +480,9 @@ public class TimeQueryServiceTests
                     It.IsAny<string>(),
                     It.IsAny<int>(),
                     It.IsAny<int>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<bool>(),
                     It.IsAny<CancellationToken>()
                 )
             )
@@ -483,6 +513,9 @@ public class TimeQueryServiceTests
                             It.IsAny<string>(),
                             It.IsAny<int>(),
                             It.IsAny<int>(),
+                            It.IsAny<string>(),
+                            It.IsAny<string>(),
+                            It.IsAny<bool>(),
                             It.IsAny<CancellationToken>()
                         ),
                     Times.Once
@@ -770,6 +803,9 @@ public class TimeQueryServiceTests
                     It.IsAny<string>(),
                     It.IsAny<int>(),
                     It.IsAny<int>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<bool>(),
                     It.IsAny<CancellationToken>()
                 )
             )
@@ -785,6 +821,9 @@ public class TimeQueryServiceTests
                     It.IsAny<string>(),
                     It.IsAny<int>(),
                     It.IsAny<int>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<bool>(),
                     It.IsAny<CancellationToken>()
                 ),
             Times.Once
@@ -819,6 +858,9 @@ public class TimeQueryServiceTests
                     It.IsAny<string>(),
                     It.IsAny<int>(),
                     It.IsAny<int>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<bool>(),
                     cancellationToken
                 )
             )
@@ -841,6 +883,9 @@ public class TimeQueryServiceTests
                     It.IsAny<string>(),
                     It.IsAny<int>(),
                     It.IsAny<int>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<bool>(),
                     cancellationToken
                 ),
             Times.Once
@@ -877,6 +922,9 @@ public class TimeQueryServiceTests
                     It.IsAny<string>(),
                     It.IsAny<int>(),
                     It.IsAny<int>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<bool>(),
                     cancellationToken
                 )
             )
@@ -900,6 +948,9 @@ public class TimeQueryServiceTests
                     It.IsAny<string>(),
                     It.IsAny<int>(),
                     It.IsAny<int>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<bool>(),
                     cancellationToken
                 ),
             Times.Once
@@ -934,6 +985,9 @@ public class TimeQueryServiceTests
                     It.IsAny<string>(),
                     It.IsAny<int>(),
                     It.IsAny<int>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<bool>(),
                     It.IsAny<CancellationToken>()
                 )
             )
@@ -949,6 +1003,9 @@ public class TimeQueryServiceTests
                     It.IsAny<string>(),
                     It.IsAny<int>(),
                     It.IsAny<int>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<bool>(),
                     It.IsAny<CancellationToken>()
                 ),
             Times.Once
