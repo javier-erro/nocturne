@@ -3,6 +3,7 @@ import type {
   Entry,
   Treatment,
   TrackerInstanceDto,
+  TrackerRealtimeAction,
   InAppNotificationDto,
 } from '$lib/api/generated/nocturne-api-client';
 
@@ -76,7 +77,7 @@ export interface StatusEvent {
 }
 
 export interface TrackerUpdateEvent {
-  action: 'create' | 'reopen' | 'delete' | 'complete' | 'ack';
+  action: TrackerRealtimeAction;
   instance: TrackerInstanceDto;
 }
 
