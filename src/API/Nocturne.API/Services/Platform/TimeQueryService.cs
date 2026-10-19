@@ -78,11 +78,11 @@ public class TimeQueryService : ITimeQueryService
                 )
             ).Select(t => ConvertTreatmentToEntry(t)),
             "devicestatus" => (
-                await _deviceStatuses.GetAsync(
+                await _deviceStatuses.GetMatchingAsync(
+                    DeviceStatusProjectionService.ParseFind(findQuery),
                     count: 1000,
                     skip: 0,
-                    find: findQuery,
-                    ct: cancellationToken
+                    cancellationToken
                 )
             ).Select(ds => ConvertDeviceStatusToEntry(ds)),
             _ => throw new ArgumentException($"Unsupported storage type: {storage}"),
@@ -132,11 +132,11 @@ public class TimeQueryService : ITimeQueryService
                 )
             ).Select(t => ConvertTreatmentToEntry(t)),
             "devicestatus" => (
-                await _deviceStatuses.GetAsync(
+                await _deviceStatuses.GetMatchingAsync(
+                    DeviceStatusProjectionService.ParseFind(findQuery),
                     count: 1000,
                     skip: 0,
-                    find: findQuery,
-                    ct: cancellationToken
+                    cancellationToken
                 )
             ).Select(ds => ConvertDeviceStatusToEntry(ds)),
             _ => throw new ArgumentException($"Unsupported storage type: {storage}"),
