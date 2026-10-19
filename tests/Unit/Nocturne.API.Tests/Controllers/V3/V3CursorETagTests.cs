@@ -61,7 +61,7 @@ public class V3CursorETagTests
 
         var projectionService = new Mock<IProfileProjectionService>();
         projectionService
-            .Setup(s => s.GetProfilesAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .Setup(s => s.GetProfilesAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new[] { new Profile { Mills = mills } });
         projectionService
             .Setup(s => s.CountProfilesAsync(It.IsAny<string?>(), It.IsAny<CancellationToken>()))
@@ -78,7 +78,7 @@ public class V3CursorETagTests
     {
         var projectionService = new Mock<IProfileProjectionService>();
         projectionService
-            .Setup(s => s.GetProfilesAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .Setup(s => s.GetProfilesAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new[] { new Profile { Mills = 1 } });
         projectionService
             .Setup(s => s.CountProfilesAsync(It.IsAny<string?>(), It.IsAny<CancellationToken>()))
@@ -102,7 +102,7 @@ public class V3CursorETagTests
 
         var projectionService = new Mock<IProfileProjectionService>();
         projectionService
-            .Setup(s => s.GetProfilesAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .Setup(s => s.GetProfilesAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new[] { new Profile { Mills = mills } });
         projectionService
             .Setup(s => s.CountProfilesAsync(It.IsAny<string?>(), It.IsAny<CancellationToken>()))

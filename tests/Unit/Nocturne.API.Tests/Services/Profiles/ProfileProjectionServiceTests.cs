@@ -142,6 +142,20 @@ public class ProfileProjectionServiceTests
     }
 
     [Fact]
+    public async Task GetProfilesAsync_Ascending_PagesFromTheOldestProfile()
+    {
+        var corr = Guid.NewGuid();
+        _therapyRepo.Setup(r => r.GetAsync(null, null, null, null, 1, 0, false, default))
+            .ReturnsAsync([CreateTherapySettings(correlationId: corr, profileName: "Oldest")]);
+        SetupCorrelationLookups(corr);
+
+        var result = (await _sut.GetProfilesAsync(count: 1, skip: 0, descending: false)).ToList();
+
+        result.Should().ContainSingle().Which.DefaultProfile.Should().Be("Oldest");
+        _therapyRepo.Verify(r => r.GetAsync(null, null, null, null, 1, 0, true, default), Times.Never);
+    }
+
+    [Fact]
     public async Task GetProfilesAsync_EmptyRepo_ReturnsEmpty()
     {
         _therapyRepo.Setup(r => r.GetAsync(null, null, null, null, 10, 0, true, default))

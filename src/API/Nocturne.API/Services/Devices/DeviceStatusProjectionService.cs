@@ -1,10 +1,13 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Web;
+using Nocturne.API.Services.Platform;
 using Nocturne.API.Services.V4;
+using Nocturne.Core.Contracts;
 using Nocturne.Core.Contracts.Repositories;
 using Nocturne.Core.Contracts.V4.Repositories;
 using Nocturne.Core.Models;
+using Nocturne.Core.Models.Queries;
 using Nocturne.Core.Models.V4;
 
 namespace Nocturne.API.Services.Devices;
@@ -55,18 +58,51 @@ public class DeviceStatusProjectionService
     }
 
     /// <summary>
-    /// Returns paginated <see cref="DeviceStatus"/> documents projected from V4 snapshots, newest first.
+    /// Returns paginated <see cref="DeviceStatus"/> documents projected from V4 snapshots, newest first
+    /// or, when <paramref name="descending"/> is <c>false</c>, the oldest oldest first.
     /// </summary>
     /// <param name="count">Maximum number of results.</param>
     /// <param name="skip">Number of results to skip for pagination.</param>
     /// <param name="find">MongoDB-style query filter supporting <c>device</c> and <c>created_at</c> date range filters.</param>
     /// <param name="ct">Cancellation token.</param>
+    /// <param name="descending">Newest first when <c>true</c>, else the oldest first.</param>
+    /// <param name="sort">
+    /// <see cref="ReadSortField.SrvModified"/> orders by modification stamp when the find is empty or
+    /// only bounds <c>srvModified</c> from below, which is served by the modified-since pages; any
+    /// other field orders by time.
+    /// </param>
     public async Task<IEnumerable<DeviceStatus>> GetAsync(
-        int count, int skip, string? find, CancellationToken ct)
+        int count, int skip, string? find, CancellationToken ct,
+        bool descending = true, ReadSortField sort = ReadSortField.Time)
     {
+        if (ModifiedSearch.CursorFor(FindQuery.Parse(find), sort, descending) is { } after)
+            return await GetModifiedAfterAsync(count, skip, after, sort, descending, ct);
+
         var (device, from, to) = ParseFindQuery(find);
-        var groups = await _groupRepo.GetAsync(from, to, device, count, skip, ct);
+        var groups = await _groupRepo.GetAsync(from, to, device, count, skip, descending, ct);
         return await ProjectAsync(groups, ct);
+    }
+
+    private async Task<IEnumerable<DeviceStatus>> GetModifiedAfterAsync(
+        int count, int skip, long after, ReadSortField sort, bool descending, CancellationToken ct)
+    {
+        var live = await ModifiedSearch.CollectAsync(
+            async (cursor, limit, token) =>
+            {
+                var page = (await GetModifiedSinceAsync(cursor, limit, token)).ToList();
+                return new ModifiedSearch.Page<DeviceStatus>(page, page.Count == 0 ? null : page[^1].SrvModified, page.Count < limit);
+            },
+            status => status.IsValid == false,
+            after,
+            ModifiedSearch.ArrivesInOrder(sort, descending) ? (long)count + skip : null,
+            ModifiedSearch.MaxRead,
+            ct);
+
+        Func<DeviceStatus, long> key = sort == ReadSortField.SrvModified
+            ? status => status.SrvModified ?? status.Mills
+            : status => status.Mills;
+
+        return (descending ? live.OrderByDescending(key) : live.OrderBy(key)).Skip(skip).Take(count).ToList();
     }
 
     /// <summary>

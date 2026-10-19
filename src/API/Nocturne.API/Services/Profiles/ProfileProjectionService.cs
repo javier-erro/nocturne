@@ -65,11 +65,11 @@ public class ProfileProjectionService : IProfileProjectionService
 
     /// <inheritdoc />
     public async Task<IEnumerable<Profile>> GetProfilesAsync(
-        int count = 10, int skip = 0, CancellationToken ct = default)
+        int count = 10, int skip = 0, bool descending = true, CancellationToken ct = default)
     {
         var settingsList = await _therapyRepo.GetAsync(
             from: null, to: null, device: null, source: null,
-            limit: count, offset: skip, descending: true, ct: ct);
+            limit: count, offset: skip, descending: descending, ct: ct);
 
         var profiles = new List<Profile>();
         foreach (var settings in settingsList)

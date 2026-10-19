@@ -308,7 +308,7 @@ public class EntryServiceTests
     [Fact]
     [Trait("Category", "Unit")]
     [Trait("Category", "Parity")]
-    public async Task GetEntriesWithAdvancedFilterAsync_WithFullParameterSet_PassesAllParams()
+    public async Task QueryEntriesAsync_PassesTheQueryToTheStore()
     {
         // Arrange
         var type = "sgv";
@@ -329,8 +329,12 @@ public class EntryServiceTests
             .ReturnsAsync(expectedEntries);
 
         // Act
-        var result = await _sut.GetEntriesWithAdvancedFilterAsync(
-            type, 20, 10, findQuery, dateString, true, CancellationToken.None);
+        var result = await _sut.QueryEntriesAsync(
+            new EntryQuery
+            {
+                Type = type, Find = findQuery, Count = 20, Skip = 10, DateString = dateString, ReverseResults = true,
+            },
+            CancellationToken.None);
 
         // Assert
         Assert.Single(result);

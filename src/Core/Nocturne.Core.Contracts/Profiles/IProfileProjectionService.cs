@@ -31,13 +31,16 @@ public interface IProfileProjectionService
     Task<Profile?> GetProfileByIdAsync(string id, CancellationToken ct = default);
 
     /// <summary>
-    /// Get a paginated list of profiles, ordered by timestamp descending.
+    /// Get a paginated list of profiles, ordered by timestamp: newest first when
+    /// <paramref name="descending"/> is <c>true</c>, otherwise oldest first. The page is cut from the
+    /// ordered list, so an ascending page is the oldest profiles.
     /// </summary>
     /// <param name="count">Maximum number of profiles to return.</param>
     /// <param name="skip">Number of profiles to skip for pagination.</param>
+    /// <param name="descending">Whether the newest profile comes first.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>Projected profiles from V4 therapy settings.</returns>
-    Task<IEnumerable<Profile>> GetProfilesAsync(int count = 10, int skip = 0, CancellationToken ct = default);
+    Task<IEnumerable<Profile>> GetProfilesAsync(int count = 10, int skip = 0, bool descending = true, CancellationToken ct = default);
 
     /// <summary>
     /// Profiles whose <c>srvModified</c> — the newest write stamp among the therapy settings and the
