@@ -71,6 +71,10 @@ import {
 import { isEntryDocument } from "$lib/websocket/payloads";
 import { isRecord } from "$lib/utils/type-guards";
 import { toIsoString } from "$lib/utils/api-date";
+import {
+  resolveChartThresholds,
+  type ChartThresholds,
+} from "$lib/constants/glucose-thresholds";
 
 /** The tracker levels loud enough for the notifications list; Info stays on the pill. */
 const TRACKER_NOTIFICATION_LEVELS: Partial<Record<NotificationUrgency, "warn" | "hazard" | "urgent">> = {
@@ -277,16 +281,16 @@ export class RealtimeStore {
   /** Current glucose values */
   currentBG = $derived(this.currentEntry?.sgv ?? this.currentEntry?.mgdl ?? 0);
   previousBG = $derived(
-    this.previousEntry?.sgv ?? this.previousEntry?.mgdl ?? 0
+    this.previousEntry?.sgv ?? this.previousEntry?.mgdl ?? null
   );
 
-  /** Delta calculation - prefer entry delta, fallback to computed */
-  bgDelta = $derived.by(() => {
-    if (this.currentEntry?.delta != null) {
-      return this.currentEntry.delta;
-    }
-    return this.currentBG - this.previousBG;
-  });
+  bgDelta = $derived(
+    glucoseDelta(
+      this.currentEntry?.delta,
+      this.currentEntry?.sgv ?? this.currentEntry?.mgdl ?? null,
+      this.previousBG
+    )
+  );
 
   /**
    * Trend direction exactly as the reading carried it, empty when it carried none.
@@ -365,7 +369,7 @@ export class RealtimeStore {
       );
   });
 
-  constructor(config: WebSocketConfig) {
+  constructor(private readonly config: WebSocketConfig) {
     this.websocketClient = new WebSocketClient(config);
     this.setupEventHandlers();
   }
@@ -987,6 +991,9 @@ export class RealtimeStore {
       }
     }
     this.websocketClient.destroy();
+    this.websocketClient = new WebSocketClient(this.config);
+    this.setupEventHandlers();
+    this._initStarted = false;
 
     if (this.entryCreateFlushTimeout !== null) {
       clearTimeout(this.entryCreateFlushTimeout);
@@ -1269,6 +1276,20 @@ export function tryGetRealtimeStore(): RealtimeStore | null {
 }
 
 /**
+ * The tenant's chart thresholds with the shared fallbacks laid over whatever the
+ * realtime store has not loaded. Call during component initialisation, like
+ * {@link tryGetRealtimeStore}; `current` is reactive.
+ */
+export function tenantChartThresholds(): { readonly current: ChartThresholds } {
+  const store = tryGetRealtimeStore();
+  return {
+    get current() {
+      return resolveChartThresholds(store?.chartThresholds);
+    },
+  };
+}
+
+/**
  * The minimal live-glucose surface a clock face renders. Satisfied by the
  * lightweight polling `PublicClockStore` (anonymous public clock links) and by
  * {@link clockGlucoseSourceOf} over the full {@link RealtimeStore}
@@ -1285,14 +1306,16 @@ export interface ClockGlucoseSource {
   /** Null when there is no reading, so age and staleness have nothing to measure. */
   readonly lastUpdated: number | null;
   readonly demoMode: boolean;
+  /** The shared fallbacks when the source has no tenant thresholds, as the public clock has none. */
+  readonly thresholds: ChartThresholds;
 }
 
 /**
- * The change a face may show: the reading's own delta, else the gap to the
- * previous reading. Null when there is neither — a lone reading is not a rise
+ * The change a surface may show: the reading's own delta, else the gap to the
+ * previous reading. Null when there is neither, since a lone reading is not a rise
  * from zero.
  */
-export function clockGlucoseDelta(
+export function glucoseDelta(
   carried: number | null | undefined,
   currentBG: number | null | undefined,
   previousBG: number | null | undefined
@@ -1303,14 +1326,14 @@ export function clockGlucoseDelta(
 }
 
 /**
- * The store's own `currentBG`/`lastUpdated`/`bgDelta` fall back to 0 and the
+ * The store's own `currentBG`/`lastUpdated` fall back to 0 and the
  * current time for the dashboard tiles, which cannot tell an absent reading
  * from a real one.
  */
 export function clockGlucoseSourceOf(
   store: Pick<
     RealtimeStore,
-    "currentEntry" | "previousEntry" | "direction" | "demoMode"
+    "currentEntry" | "previousEntry" | "direction" | "demoMode" | "chartThresholds"
   >
 ): ClockGlucoseSource {
   const mgdlOf = (entry: Entry | null) => entry?.sgv ?? entry?.mgdl ?? null;
@@ -1319,7 +1342,7 @@ export function clockGlucoseSourceOf(
       return mgdlOf(store.currentEntry);
     },
     get bgDelta() {
-      return clockGlucoseDelta(
+      return glucoseDelta(
         store.currentEntry?.delta,
         mgdlOf(store.currentEntry),
         mgdlOf(store.previousEntry)
@@ -1333,6 +1356,9 @@ export function clockGlucoseSourceOf(
     },
     get demoMode() {
       return store.demoMode;
+    },
+    get thresholds() {
+      return resolveChartThresholds(store.chartThresholds);
     },
   };
 }
